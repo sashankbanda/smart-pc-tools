@@ -310,6 +310,8 @@ The manifest is handy later: `Get-FileHash` on any copied file should match its 
 
 **Quality is never reduced.** The script performs a binary copy and has no decoder in the path. If you want to be certain your HEIC files stay HEIC, check *Settings > Photos > Transfer to Mac or PC* is set to **Keep Originals**; on *Automatic* the phone itself converts to JPEG during transfer, before the script ever sees the file. When that happens the size the phone reported in the scan differs from what arrives; the script trusts the transfer, verifies it, and notes the difference on that file's line.
 
+**Freeing up gives back less space than the app showed?** Two usual reasons. On *Settings > Photos > Transfer to Mac or PC: Automatic* the iPhone converts while sending - HEIC photos become JPG and HEVC videos become H.264 - so the files listed (and copied) are 1.5 to 2 times larger than what the iPhone actually stores; the app warns when it sees this. Choose **Keep Originals** before copying to get the untouched, smaller originals. And the iPhone may keep deleted items in *Photos > Albums > Recently Deleted* for 30 days - *Delete All* there gives the space back at once. iPhone Storage in Settings can also take a few minutes to update.
+
 **Dates are preserved.** Each copied file gets the phone's modified and created dates (the capture time for photos), so sorting by date in Explorer works as expected.
 
 ## Troubleshooting

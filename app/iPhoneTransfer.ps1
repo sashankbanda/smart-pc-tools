@@ -499,6 +499,8 @@ function Save-Settings {
             <StackPanel Grid.Column="1" Margin="12,0,12,0">
               <TextBlock x:Name="RecommendTitle" Text="Reading your folders..." FontWeight="SemiBold" Foreground="#1E3A8A" TextWrapping="Wrap"/>
               <TextBlock x:Name="RecommendText" Text="A recommendation appears once every folder has been read." Foreground="#1E40AF" FontSize="13" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              <TextBlock x:Name="ConvertTip" Visibility="Collapsed" Foreground="#92400E" FontSize="13" TextWrapping="Wrap" Margin="0,8,0,0"
+                         Text="Your iPhone is sending converted copies (JPG photos and H.264 videos) instead of its originals. They are larger than what is stored on the iPhone - so freeing up gives back less space than shown here - and re-encoded. For the untouched originals: on the iPhone open Settings > Apps > Photos > Transfer to Mac or PC and choose Keep Originals, then unplug, plug in again and press Read again."/>
             </StackPanel>
             <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
               <Button x:Name="ResumeButton" Content="Continue last copy" Style="{StaticResource Primary}" Padding="14,7" FontSize="13" Margin="0,0,8,0" Visibility="Collapsed"/>
@@ -1302,6 +1304,20 @@ function Get-Recommendation {
     return @{ Rows = $picked; Bytes = $used; Skipped = $skipped; Budget = $budget }
 }
 
+function Update-ConvertTip {
+    # Lots of JPGs and next to no HEIC from an iPhone means it converts while sending
+    # ("Transfer to Mac or PC: Automatic") - worth saying before anything is copied.
+    if ($app.SourceKind -ne 'Device') { $ui.ConvertTip.Visibility = 'Collapsed'; return }
+    $jpg = 0; $heic = 0
+    foreach ($s in $app.Summaries.Values) {
+        foreach ($t in $s.Types) {
+            if ($t.Ext -in '.JPG', '.JPEG') { $jpg += $t.Count }
+            elseif ($t.Ext -in '.HEIC', '.HEIF') { $heic += $t.Count }
+        }
+    }
+    if ($jpg -ge 50 -and $jpg -gt 5 * $heic) { $ui.ConvertTip.Visibility = 'Visible' } else { $ui.ConvertTip.Visibility = 'Collapsed' }
+}
+
 function Update-Recommendation {
     if (-not $app.Dest) {
         $ui.RecommendTitle.Text = 'Choose where to save the photos.'
@@ -1857,6 +1873,7 @@ function Invoke-EngineEvent {
             $app.Scanning = $false; $app.ScanDone = $true
             foreach ($row in $app.Rows) { if (-not $row.Scanned) { $row.Status = 'Not read'; $row.StatusColor = $GRAY; $row.Note = 'Press Read again to read it.' } }
             Update-Recommendation
+            Update-ConvertTip
             if ($app.Dest -and -not $app.AutoSelected -and @($app.Rows | Where-Object { $_.Selected }).Count -eq 0) { Select-Recommended; $app.AutoSelected = $true }
             Write-UiLog 'scan complete'
         }
@@ -1916,6 +1933,7 @@ function Invoke-EngineEvent {
                 $ui.WaitingBanner.Visibility = 'Visible'
                 $ui.CopyRate.Text = 'Waiting for the iPhone...'
                 if ($app.Page -eq 'Check') { $ui.CheckStep.Text = 'The iPhone has stopped sending files - unplug it, plug it back in and unlock it. The check then continues.' }
+                if ($app.Page -eq 'Delete') { $ui.DeleteStep.Text = 'The iPhone has stopped answering - unplug it, plug it back in and unlock it. Deleting then continues by itself.'; Set-Color $ui.DeleteStep 'Foreground' $AMBER }
                 $window.TaskbarItemInfo.ProgressState = 'Paused'
                 [System.Media.SystemSounds]::Exclamation.Play()
             }
@@ -1932,9 +1950,13 @@ function Invoke-EngineEvent {
                 $ui.WaitingBanner.Visibility = 'Visible'
                 $window.TaskbarItemInfo.ProgressState = 'Paused'
                 if ($app.Page -eq 'Check') { $ui.CheckStep.Text = 'Waiting for the iPhone - plug it back in and unlock it' }
+                if ($app.Page -eq 'Delete') { $ui.DeleteStep.Text = 'Waiting for the iPhone - unplug it, plug it back in and unlock it. Deleting then continues by itself.'; Set-Color $ui.DeleteStep 'Foreground' $AMBER }
                 [System.Media.SystemSounds]::Exclamation.Play()
             }
-            else { $ui.WaitingBanner.Visibility = 'Collapsed'; $window.TaskbarItemInfo.ProgressState = 'Normal' }
+            else {
+                $ui.WaitingBanner.Visibility = 'Collapsed'; $window.TaskbarItemInfo.ProgressState = 'Normal'
+                if ($app.Page -eq 'Delete') { $ui.DeleteStep.Text = 'Deleting from the iPhone...'; Set-Color $ui.DeleteStep 'Foreground' '#0F172A' }
+            }
         }
         'CopyDone' { Complete-Copy $e }
         'CompareDone' {

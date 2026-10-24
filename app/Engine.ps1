@@ -1589,6 +1589,12 @@ function Invoke-Delete {
             $deleted = 0; $deletedBytes = [int64] 0; $kept = 0; $failedHere = 0
             $P.CurrentFolder = $name
 
+            $pass = 0
+            $again = $true
+            while ($again -and $pass -lt 6) {
+            $pass++
+            $again = $false
+            $kept = 0
             # A fresh listing: anything added since the check is left alone.
             $items = New-Object System.Collections.ArrayList
             $top = $null
@@ -1643,7 +1649,7 @@ function Invoke-Delete {
                 # Last proof, where it is cheap: read the source file once more and compare it with
                 # the checked fingerprint. Every file of an ordinary folder, and small phone files
                 # (edit files, screenshots) whose content can change without the size changing.
-                if ($record.Sha -and ($item.IsFileSystem -or $record.Size -le 4MB)) {
+                if ($record.Sha -and ($item.IsFileSystem -or $record.Size -le 512KB)) {
                     $same = $false
                     try { $same = ((Read-SourceStream -Entry @{ Item = $item }).Sha -eq $record.Sha) }
                     catch { if (Test-Cancelled $_) { throw } }
@@ -1655,7 +1661,13 @@ function Invoke-Delete {
                 catch {
                     $result = 'failed: ' + (Get-ErrorText $_)
                     if ($script:Source.Kind -eq 'Device' -and -not (Test-SourceAvailable)) {
+                        # The phone dropped out. Wait for it, then read the folder again: the old
+                        # handles are no good any more. This file is tried again in the next pass.
+                        Write-Log "delete: the source dropped out at $rel\$fileName - waiting, then reading the folder again"
                         if (-not (Wait-ForDevice)) { throw (New-Object System.OperationCanceledException) }
+                        Reset-DeviceConnection
+                        $again = $true
+                        break
                     }
                 }
                 $writer.WriteLine(((@((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $script:Source.Label, $rel, $fileName, $record.Size, $record.Dest, $record.Sha, $result) | ForEach-Object { ConvertTo-CsvField $_ }) -join ','))
@@ -1665,6 +1677,7 @@ function Invoke-Delete {
                 $P.BytesDone = [int64] $P.BytesDone + $record.Size
                 Update-Progress -Force
             }
+            }   # passes
 
             $remaining = -1
             try { $remaining = (Read-TopFolder $name).Count } catch { }
