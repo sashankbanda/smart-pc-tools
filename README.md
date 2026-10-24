@@ -1,68 +1,103 @@
 # iPhone Media Transfer
 
-A PowerShell script that scans a cabled iPhone, shows you what is on it, and copies the photos and videos into a folder on your PC - verified, resumable, with live progress.
+Copy the photos and videos off your iPhone onto your Windows PC, check that every single file arrived intact, and only then free up the space on the phone.
 
-No iTunes sync, no cloud upload, no third-party transfer tool. Files are copied byte-for-byte - nothing is re-encoded, original capture dates are preserved, and every file is checked before it is put in place.
+No iTunes sync, no cloud upload, no third-party service. Files are copied byte for byte: nothing is re-encoded, and the original capture dates are kept.
 
-## What it does
+It comes in two forms:
 
-1. **Scan** - every folder on the phone is read first. You get a report per folder (file count, photos / videos / other, size, date range) and a breakdown by file type, with live progress while it reads.
-2. **Plan** - the scan is compared with your destination folder. Files already there are skipped, so an interrupted transfer picks up where it stopped. A same-named but different file is never overwritten: it is saved alongside as `IMG_1234_1.JPG`.
-3. **Copy** - each file is streamed into a staging area on the destination drive, its size is checked against what the phone reported, its SHA-256 is computed on the way in and checked again by reading the file back, its dates are restored, and only then is it moved into place. A file at its final path is always complete.
-4. **Summary** - what was copied, what was already there, what failed and why, average speed, and where the log and manifest are.
+- **The iPhone Transfer app** - a simple window that walks you through it. Made for everyone; no typing.
+- **The `Copy-IPhoneMedia.ps1` script** - the same verified copy from the command line, for repeat or scheduled runs.
 
-One failing file never stops the run. It is retried, the script waits for an unplugged phone to come back, and whatever still fails is listed at the end. Run the same command again and only the missing files are copied.
+## Before you start
 
-## Features
+**1. Install Apple Devices** from the Microsoft Store: **➡️ [Apple Devices](https://apps.microsoft.com/detail/9np83lwlpz9k?hl=en-US&gl=BG)**
 
-- Copies `.MOV`, `.JPG`, `.HEIC`, `.PNG` and `.MP4` by default - any file types you like, or everything with `*`
-- Scan report before anything is written: per-folder counts, sizes, dates, and a per-type breakdown
-- Pick which month folders to pull with wildcards, e.g. `2026*` or `202608_*,202609_*`
-- Keeps the phone's folder structure, or flattens it with `-Flat`
-- **Verified**: size check against the phone, SHA-256 on the way in, read back and compared, before the file is placed
-- **Resumable**: already-copied files are skipped; a re-run only costs what is missing
-- **Never silently overwrites**: a same-named but different file is kept alongside as `name_1.ext` (or replaced with `-Overwrite`)
-- **Survives hiccups**: per-file retries, waits for a disconnected phone, stops cleanly when the disk is full, Ctrl+C leaves nothing half-written
-- **Live progress**: overall bytes and percent, throughput, ETA, the current file - and the window title shows the percent
-- Log, scan report and a CSV manifest (with the SHA-256 of every file copied) in a hidden `.iphone-transfer` folder at the destination
-- `-DryRun` shows exactly what would be copied; `-ScanOnly` just prints the report
-- Around 20 MB/s over USB with the default engine (roughly 1.2 GB per minute); your cable and port decide
+Windows cannot see an iPhone on its own - plug one into a fresh Windows install and you get a charging cable and nothing else. Apple Devices adds the *Apple Mobile Device Support* drivers that make the iPhone and its photo folders appear under **This PC**. You do not have to open the app, create an account or sign in; installing it is enough. If you already have iTunes or Apple Devices, you are ready.
 
-## Requirements
-
-### 1. Apple drivers - install this first
-
-**➡️ [Apple Devices (Microsoft Store)](https://apps.microsoft.com/detail/9np83lwlpz9k?hl=en-US&gl=BG)**
-
-This is Apple's official Windows app, and it is the only prerequisite you actually have to install.
-
-**Why you need it:** Windows cannot talk to an iPhone on its own. Plug a phone into a fresh Windows install and you get a charging cable and nothing else - no drive, no folders, nothing in File Explorer. Installing Apple Devices adds the *Apple Mobile Device Support* drivers, which is what makes your iPhone appear under **This PC** with its photo folders visible. The script reads those folders, so without the drivers it has nothing to work with.
-
-**You do not have to open the app, create an Apple account, or sign into anything.** Installing it is enough - the drivers register themselves. If you already have iTunes or Apple Devices installed, you are ready to go.
-
-### 2. Windows
-
-Windows 10 or 11 with PowerShell, which is preinstalled. Nothing else to set up. The script compiles a tiny helper on first run (about a second); if that is ever blocked, it falls back to the Explorer copy operation automatically.
-
-> [!IMPORTANT]
-> A connected iPhone is an MTP device: it has no drive letter and exists only inside Windows Explorer's namespace. WSL never sees the USB device, so `cp`, `rsync` and `find` have nothing to open. The included `copy_iphone_media.sh` is a bash companion with the same scan / plan / verified copy / resume flow, but it only works on ordinary folders (a mounted drive, an SD card, an already-imported folder) - never on the phone itself.
-
-### 3. The phone, unlocked and trusted
-
-Connect the cable, unlock the screen, and tap **Trust This Computer** when the phone asks. A locked or untrusted phone shows up as empty.
-
-## Installation
-
-Clone the repo, or just download `Copy-IPhoneMedia.ps1` - it is a single self-contained file with no dependencies.
+**2. Get this project.** On GitHub press **Code > Download ZIP** and unzip it anywhere (for example into *Documents*), or:
 
 ```bash
-git clone https://github.com/kyuchukovv/iphone-media-transfer.git
+git clone https://github.com/sashankbanda/iphone-file-transfer.git
 ```
 
-> [!NOTE]
-> If you download the file directly, check the saved filename. Some browsers strip hyphens and save it as `CopyIPhoneMedia.ps1`. Use whatever name is actually on disk, or rename it back.
+Windows 10 or 11 is all you need otherwise - PowerShell is built in.
 
-## Finding your phone's path
+**3. Plug in the iPhone, unlock it, and tap "Trust"** when it asks. A locked or untrusted phone shows up as empty.
+
+## The app
+
+**Double-click `iPhone Transfer.cmd`.** A window opens and walks you through five steps. In the app's sidebar, *Add a desktop shortcut* puts an icon on your desktop for next time.
+
+### 1. Connect
+
+The app watches for the iPhone and finds it by itself as soon as it is plugged in and unlocked. If it is plugged in but locked, it tells you to unlock it. If nothing shows up, *The iPhone does not show up?* lists the usual fixes.
+
+Not an iPhone? *Use a folder on this PC instead* works with an SD card, a camera, or an old backup folder.
+
+### 2. Choose folders
+
+The iPhone keeps photos in one folder per month (`202608_a` is August 2026; a busy month gets `_b`, `_c`, ...). The app reads every folder and shows, per folder:
+
+- the dates the photos were taken
+- how many photos, videos and other files are in it, and its size
+- whether it is already on this PC: *Not on this PC yet*, *Partly (1,200 of 2,159)*, or *On this PC*
+
+Above the list it shows where the files will be saved, **how much free space the PC has**, and how much the current selection needs - with a bar that turns red when it would not fit. Other drives and their free space are one click away.
+
+**It then recommends what to copy:** whole folders only, so a month is either completely on the PC or not at all; interrupted folders first, then the oldest; as many as fit with room to spare. The recommendation is pre-selected - tick or untick folders as you like. The bottom bar shows the selection's size and how long it will take.
+
+Every file type in a folder is copied, including edited versions, Live Photo videos and Apple's `.AAE` edit files, so nothing is left behind when you later free up the phone.
+
+### 3. Copy
+
+A big progress view shows the percent, gigabytes done, speed, time left, and the file being copied, with a bar per folder. The taskbar button shows the progress too, and **the PC does not go to sleep while copying**.
+
+- **Pause / Stop** at any time. Everything copied so far is complete and kept.
+- **Unplugged or locked the iPhone?** The app says so and waits. Plug it back in and unlock it - copying continues by itself from where it stopped.
+- **Closed the app, or the PC restarted?** Open it again. The interrupted folders show as *Partly* and are recommended first, and a *Continue last copy* button appears. Files already copied are never copied twice.
+- **The PC's disk fills up?** Copying stops cleanly before it is full, and tells you so.
+
+### 4. Check
+
+As soon as the copy finishes, the app checks **every file on the iPhone against its copy on the PC**:
+
+- the file must be there, with the same name and the same size
+- the copy is read back from the PC's disk and its digital fingerprint (SHA-256) must match the fingerprint taken while the bytes came off the phone
+- where there is no fingerprint (files copied earlier by something else) or the dates do not line up, the file is read from the iPhone again and compared byte for byte
+
+Each folder gets a verdict - *All 2,159 match - 100% safe*, or which files need attention and why. **Full check** reads every file from the iPhone again, for complete peace of mind (it takes about as long as the copy). **Open the report** shows every file with its size on both sides and how it was checked. *Copy the missing files* fixes any problems.
+
+### 5. Free up iPhone (optional)
+
+Only folders that passed the check with **every single file matching** are offered. You tick the ones to remove, confirm that you understand, and confirm once more. Then:
+
+- just before each file is deleted, its copy on the PC is confirmed again
+- photos added to a folder after the check are never deleted
+- the copies on the PC are never touched
+- every deleted file is recorded, with where its copy is and its fingerprint
+
+> [!WARNING]
+> Deleting from the iPhone cannot be undone from the PC. **If you use iCloud Photos, deleting photos on the iPhone also deletes them from iCloud and your other Apple devices.** Check *Settings > [your name] > iCloud > Photos* on the iPhone first.
+
+### Where things are kept
+
+| What | Where |
+| --- | --- |
+| Your photos and videos | The folder you chose (default `Pictures\iPhone`), one sub-folder per phone folder |
+| Fingerprints of every copied file | `<that folder>\.iphone-transfer\manifest.csv` (hidden folder) |
+| Check reports | `<that folder>\.iphone-transfer\check-<date>.html` and `.csv` |
+| List of files deleted from the phone | `<that folder>\.iphone-transfer\deleted-from-source.csv` |
+| Activity log | `%LOCALAPPDATA%\iPhoneTransfer\logs` - *Open the activity log* in the sidebar |
+| Last destination and measured speed | `%APPDATA%\iPhoneTransfer\settings.json` |
+
+The app and the command-line script share the destination's `manifest.csv`, so files copied by one are recognised - and checked - by the other.
+
+## The command-line script
+
+`Copy-IPhoneMedia.ps1` does the same scan, verified copy and resume from a PowerShell window or a scheduled task. `run.cmd` starts it in question-and-answer mode, `scan.cmd` prints a report of what is on the phone and copies nothing.
+
+### Finding your phone's path
 
 Open File Explorer and look under **This PC**. Your iPhone appears as a device, and the path looks like this:
 
@@ -70,9 +105,9 @@ Open File Explorer and look under **This PC**. Your iPhone appears as a device, 
 This PC\Apple iPhone\Internal Storage\202607_a
 ```
 
-Folders are named by year and month, so `202607_a` is July 2026 (a busy month gets `_b`, `_c`...). Pass either a single month folder or `Internal Storage` itself with a `-Folders` filter.
+Pass either a single month folder or `Internal Storage` itself with a `-Folders` filter.
 
-## Quick start - no command line
+### Question-and-answer mode: run.cmd
 
 **Double-click `run.cmd`.** It finds your iPhone, lists its folders, scans the ones you pick, shows the report, and asks where to put the files. Nothing to type but answers - press Enter to accept any suggestion in brackets.
 
@@ -152,7 +187,7 @@ If the phone is not found, the script lists what it can see and lets you look ag
 
 **Just want the report?** Double-click `scan.cmd`. It scans the folders you pick, prints the report, saves it as a text file, and copies nothing.
 
-## Usage from the command line
+### Usage from the command line
 
 Everything can also be passed as arguments, which skips all the questions - useful for repeat or scheduled runs.
 
@@ -197,7 +232,7 @@ powershell -ExecutionPolicy Bypass -File Copy-IPhoneMedia.ps1 "This PC\Apple iPh
 > [!NOTE]
 > **Why `-ExecutionPolicy Bypass`?** Windows refuses to run unsigned `.ps1` files by default. This flag lifts that for the single command you are running and changes nothing system-wide.
 
-## Options
+### Options
 
 | Option | Description | Default |
 | --- | --- | --- |
@@ -219,7 +254,7 @@ powershell -ExecutionPolicy Bypass -File Copy-IPhoneMedia.ps1 "This PC\Apple iPh
 
 Exit codes: `0` all good, `1` could not start (bad arguments, device not found), `2` finished but some files failed, `3` interrupted.
 
-## What ends up at the destination
+### What ends up at the destination
 
 Your files, in the phone's folder structure (or flat), plus one hidden folder `.iphone-transfer` holding:
 
@@ -227,12 +262,12 @@ Your files, in the phone's folder structure (or flat), plus one hidden folder `.
 | --- | --- |
 | `transfer-<date>-<time>.log` | Everything the script printed, with timestamps, one file per run |
 | `scan-<date>-<time>.txt` | The scan report of that run |
-| `manifest.csv` | One row per file copied, appended across runs: timestamp, status (`copied`, `renamed`, `replaced`, `failed`), folder, name, size, destination path, SHA-256, seconds, attempts, error |
+| `manifest.csv` | One row per file copied, appended across runs: timestamp, status (`copied`, `renamed`, `replaced`, `failed`), folder, name, size, destination path, SHA-256 of the bytes as they came off the phone (empty for `-Engine Shell` copies, which cannot be fingerprinted), seconds, attempts, error |
 | `staging\` | Where files are written before they are verified; empty after a clean run |
 
 The manifest is handy later: `Get-FileHash` on any copied file should match its `sha256` column, which is how you check an archive years from now.
 
-## When something goes wrong
+### When something goes wrong
 
 **A file fails.** It is retried (`-Retries`, default 3) with a short pause, using a fresh handle on the phone each time. If it still fails it is listed in the summary with the reason, the run moves on, and the exit code is `2`. Run the same command again later to retry only those files.
 
@@ -244,6 +279,7 @@ The manifest is handy later: `Get-FileHash` on any copied file should match its 
 
 **A folder reports no files.** The phone often lists a month folder as empty on first access and fills it in on a later read; the script asks again once automatically and tells you if a folder stayed empty. Run it again later - copied files are skipped. If a folder stays empty across several runs, those photos genuinely are not on the device: that is iCloud's **Optimize iPhone Storage** keeping originals in the cloud. Switch to *Settings > Photos > Download and Keep Originals* and let the phone sync before copying.
 
+
 ## Things worth knowing
 
 **Scanning takes time on a phone.** Reading a folder off an iPhone costs about a tenth of a second per file, whatever tool does the reading - a month with 6,000 photos takes around ten minutes just to list. The script shows which folder it is on and how many files it has found so far, so it never looks stuck. Windows remembers what it has listed while the phone stays plugged in, so a second run right after is much faster.
@@ -254,7 +290,7 @@ The manifest is handy later: `Get-FileHash` on any copied file should match its 
 
 **Screenshots are PNG.** iPhone screenshots are saved as `.PNG`, not `.JPG`, and some clips save as `.MP4` rather than `.MOV` - both are included by default so nothing is quietly left behind.
 
-**`.AAE` files are skipped on purpose.** These sit next to edited photos and contain only the edit instructions (crop, filter, adjustments). They are useless outside Apple's Photos app, and the edited image itself already comes across as `IMG_E1234.JPG`, so there is nothing to lose by ignoring them. Pass `-Extensions *` if you want them anyway.
+**The script skips `.AAE` files by default; the app copies them.** These sit next to edited photos and contain only the edit instructions (crop, filter, adjustments). They are useless outside Apple's Photos app, and the edited image itself already comes across as `IMG_E1234.JPG`, so the script ignores them unless you pass `-Extensions *`. The app copies them anyway, so that a folder is complete on the PC before you free it up on the phone.
 
 **"Already there" means same name and same size.** That is what can be checked without reading the file off the phone again. A same-named file with a different size is treated as a different photo and kept alongside as `name_1.ext`; if a sibling with the right size already exists, it counts as already copied.
 
@@ -263,6 +299,19 @@ The manifest is handy later: `Get-FileHash` on any copied file should match its 
 **Dates are preserved.** Each copied file gets the phone's modified and created dates (the capture time for photos), so sorting by date in Explorer works as expected.
 
 ## Troubleshooting
+
+### The app
+
+| Symptom | Cause and fix |
+| --- | --- |
+| The window does not open | Look in `%LOCALAPPDATA%\iPhoneTransfer\logs\startup-errors.log`. Starting `iPhone Transfer.cmd` from the unzipped folder (not from inside the ZIP) matters. |
+| "Apple iPhone found - please unlock it" does not go away | Unlock the phone and tap Trust. Tapped *Don't Trust* by mistake? On the iPhone: *Settings > General > Transfer or Reset iPhone > Reset > Reset Location & Privacy*, then plug in again. |
+| A folder shows *Empty on iPhone* | Normal on a first read - press *Read again*. If it stays empty, those photos are only in iCloud (*Settings > Photos > Download and Keep Originals*). |
+| *Free up space on the iPhone* stays grey | No folder passed the check with every file matching. Use *Copy the missing files*, then check again. |
+| A file is reported as *Different* | The copy on the PC does not match the phone. Press *Copy the missing files* - the bad copy is kept, and a fresh copy is saved next to it as `name_1.ext`. |
+| Deleting fails for every file | Some iPhones refuse deletes from a PC. Your files are still safely copied and checked - delete them in the Photos app on the iPhone instead. |
+
+### The script
 
 | Message or symptom | Cause and fix |
 | --- | --- |

@@ -1282,7 +1282,12 @@ function Invoke-CopyPlan {
                 if ($moved.Status -eq 'renamed') { $t.Renamed++ }
                 if ($moved.Status -eq 'replaced') { $t.Replaced++ }
                 $p.DoneFiles++; $p.DoneBytes += $result.Bytes; $p.CurrentBytes = 0
-                Write-ManifestRow -Status $moved.Status -Job $job -FinalPath $moved.Path -Sha256 $result.Sha256 -Seconds $sw.Elapsed.TotalSeconds -Attempts $attempt -ErrorText ''
+                # The sha256 column is a fingerprint of the bytes as they came off the source. An
+                # Explorer (Shell engine) copy is hashed from the PC file instead, which proves nothing
+                # about the source - leave the column empty so a later check reads the source again.
+                $fingerprint = $result.Sha256
+                if ($useShell) { $fingerprint = '' }
+                Write-ManifestRow -Status $moved.Status -Job $job -FinalPath $moved.Path -Sha256 $fingerprint -Seconds $sw.Elapsed.TotalSeconds -Attempts $attempt -ErrorText ''
 
                 $extra = ''
                 if ($moved.Status -eq 'renamed')  { $extra = '  saved as ' + (Split-Path -Leaf $moved.Path) }
