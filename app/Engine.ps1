@@ -1,4 +1,13 @@
-# Engine for the iPhone Transfer app.
+# Engine for the Smart Transfer app.
+#
+# Sources: an iPhone or an Android phone (read through Windows' portable-device shell, the
+# same way Explorer shows them under This PC), or any folder or drive on the PC. A source is
+# split into "units" - the folders that are copied, checked and freed up as a whole:
+#   iPhone        its month folders (202608_a ...)
+#   Android       each folder of DCIM (Camera, Screenshots ...), the other top-level folders,
+#                 and the chat apps' media from deep inside Android\media under a short name
+#   folder/drive  the chosen folder itself, copied into the destination under its own name
+#                 (files mode: exact copy of the folder tree, nothing matched elsewhere)
 #
 # Runs on its own background thread (a separate runspace), so the window stays responsive
 # while the phone is read. It talks to the window only through $sync:
@@ -20,6 +29,12 @@
 
 $ErrorActionPreference = 'Stop'
 
+$ANDROID_SKIP = @('Android', 'Alarms', 'Notifications', 'Ringtones', 'Podcasts', 'Audiobooks', 'LOST.DIR')
+$ANDROID_APPS = @(
+    @{ Name = 'WhatsApp';          Path = 'Android\media\com.whatsapp\WhatsApp\Media' },
+    @{ Name = 'WhatsApp Business'; Path = 'Android\media\com.whatsapp.w4b\WhatsApp Business\Media' },
+    @{ Name = 'Telegram';          Path = 'Android\media\org.telegram.messenger\Telegram' }
+)
 $PHOTO_TYPES = @('.jpg', '.jpeg', '.heic', '.heif', '.png', '.dng', '.gif', '.tif', '.tiff', '.webp', '.bmp', '.raw')
 $VIDEO_TYPES = @('.mov', '.mp4', '.m4v', '.hevc', '.avi', '.3gp', '.mkv')
 $COPY_FLAGS  = 4 -bor 16 -bor 512 -bor 1024   # Explorer copy: silent, no prompts, no error dialogs
@@ -27,8 +42,10 @@ $RESERVE_BYTES = 512MB                        # never fill the PC's disk complet
 
 $script:Invariant      = [System.Globalization.CultureInfo]::InvariantCulture
 $script:Shell          = New-Object -ComObject Shell.Application
-$script:Source         = $null    # @{ Kind = 'Device' | 'Folder'; Device; Storage; Path; Label }
-$script:Folders        = @{}      # folder name -> @{ Files = list of entries; Error }
+$script:Source         = $null    # @{ Kind = 'Device' | 'Folder'; DeviceKind; Device; Storage; Path; Root; Label }
+$script:Mode           = 'Photos' # 'Photos' (phones, month folders) or 'Files' (exact copy of a folder tree)
+$script:Units          = @{}      # unit name -> its path inside the source ('' for a whole drive)
+$script:Folders        = @{}      # unit name -> @{ Files = list of entries; Error; Skipped }
 $script:Verified       = @{}      # folder name -> @{ Ok; Files = key -> record }
 $script:Manifest       = @{}      # "folder|name" -> @{ Dest; Sha; Size }
 $script:Unavailable    = @{}      # "folder|name" -> why the phone would not hand the file over
@@ -210,12 +227,13 @@ function Get-SafeName {
 }
 
 function New-Entry {
-    param($Item, [string] $Rel)
+    param($Item, [string] $Rel, [string] $Unit)
     $name = Get-RealName $Item
     $extension = [System.IO.Path]::GetExtension($name).ToLowerInvariant()
     return @{
         Name     = $name
         Rel      = $Rel
+        Unit     = $Unit
         Ext      = $extension
         Cat      = Get-Category $extension
         Size     = Get-ItemBytes $Item
@@ -229,36 +247,70 @@ function New-Entry {
 # the device
 # ---------------------------------------------------------------------------
 
-function Get-AppleDevices {
+function Get-SourceName {
+    # How messages name the source: "the iPhone", "the phone", "the source".
+    if ($script:Source -and $script:Source.Kind -eq 'Device') {
+        if ($script:Source.DeviceKind -eq 'Android') { return 'the phone' }
+        return 'the iPhone'
+    }
+    return 'the source'
+}
+
+function Get-SourceColumn {
+    if ($script:Source -and $script:Source.Kind -eq 'Device') { return ('On {0}' -f (Get-SourceName)) }
+    return 'Original'
+}
+
+function Get-PortableDevices {
+    # Phones show up under This PC as folders that are not part of the file system. Apple's
+    # carry the product name; anything else (an Android phone or tablet, also a camera) is
+    # listed under its model name, like "Pixel 8" or "Galaxy S24".
+    param([string] $Kind)
     $list = New-Object System.Collections.ArrayList
     foreach ($item in $script:Shell.NameSpace(17).Items()) {
-        if ($item.IsFolder -and -not $item.IsFileSystem -and $item.Name -match 'iPhone|iPad|iPod|Apple') { [void] $list.Add($item) }
+        if (-not $item.IsFolder -or $item.IsFileSystem) { continue }
+        $apple = ([string] $item.Name) -match 'iPhone|iPad|iPod|Apple'
+        if (($Kind -eq 'iPhone') -eq $apple) { [void] $list.Add($item) }
     }
     return , $list
 }
 
 function Get-DeviceState {
-    $devices = Get-AppleDevices
-    if ($devices.Count -eq 0) { return @{ State = 'None' } }
+    param([string] $Kind = 'iPhone')
+    $devices = Get-PortableDevices $Kind
+    if ($devices.Count -eq 0) { return @{ State = 'None'; Kind = $Kind } }
     $device = $devices[0]
+    # A locked phone (or an Android phone not set to "File transfer") lists no storage at all.
     $storages = @($device.GetFolder.Items() | Where-Object { $_.IsFolder })
-    if ($storages.Count -eq 0) { return @{ State = 'Locked'; Device = [string] $device.Name } }
-    $storage = $storages[0]
-    $names = @($storage.GetFolder.Items() | Where-Object { $_.IsFolder } | ForEach-Object { [string] $_.Name } | Sort-Object)
-    if ($names.Count -eq 0) { return @{ State = 'Empty'; Device = [string] $device.Name; Storage = [string] $storage.Name } }
-    $capacity = [int64] 0
-    $c = Get-ShellProperty $storage 'System.Capacity'
-    if ($null -ne $c) { try { $capacity = [int64] $c } catch { } }
-    return @{ State = 'Ready'; Device = [string] $device.Name; Storage = [string] $storage.Name; Capacity = $capacity; Folders = [string[]] $names; DeviceCount = $devices.Count }
+    if ($storages.Count -eq 0) { return @{ State = 'Locked'; Kind = $Kind; Device = [string] $device.Name } }
+    $usable = New-Object System.Collections.ArrayList
+    foreach ($storage in $storages) {
+        $names = @($storage.GetFolder.Items() | Where-Object { $_.IsFolder -and -not ([string] $_.Name).StartsWith('.') } | ForEach-Object { [string] $_.Name } | Sort-Object)
+        if ($names.Count -eq 0) { continue }
+        $capacity = [int64] 0; $free = [int64] -1
+        $c = Get-ShellProperty $storage 'System.Capacity'
+        if ($null -ne $c) { try { $capacity = [int64] $c } catch { } }
+        $f = Get-ShellProperty $storage 'System.FreeSpace'
+        if ($null -ne $f) { try { $free = [int64] $f } catch { } }
+        [void] $usable.Add(@{ Name = [string] $storage.Name; Capacity = $capacity; Free = $free; Folders = [string[]] $names })
+    }
+    if ($usable.Count -eq 0) { return @{ State = 'Empty'; Kind = $Kind; Device = [string] $device.Name; Storage = [string] $storages[0].Name } }
+    $first = $usable[0]
+    return @{
+        State = 'Ready'; Kind = $Kind; Device = [string] $device.Name; DeviceCount = $devices.Count
+        Storage = $first.Name; Capacity = $first.Capacity; Folders = $first.Folders; Storages = @($usable)
+    }
 }
 
 function Update-DeviceWatch {
-    if ($script:Source -and $script:Source.Kind -eq 'Folder') { return }
-    try { $state = Get-DeviceState } catch { $state = @{ State = 'None'; Message = (Get-ErrorText $_) } }
-    $signature = '{0}|{1}|{2}' -f $state.State, $state.Device, ($state.Folders -join ',')
+    $kind = [string] $sync.WatchKind
+    if (-not $kind) { $kind = 'iPhone' }
+    try { $state = Get-DeviceState -Kind $kind } catch { $state = @{ State = 'None'; Kind = $kind; Message = (Get-ErrorText $_) } }
+    $storages = @($state.Storages | ForEach-Object { $_.Name }) -join ','
+    $signature = '{0}|{1}|{2}|{3}|{4}' -f $kind, $state.State, $state.Device, $storages, ($state.Folders -join ',')
     if ($signature -ne $script:LastDeviceSig) {
         $script:LastDeviceSig = $signature
-        Write-Log "device: $($state.State) $($state.Device)"
+        Write-Log "device: $kind $($state.State) $($state.Device)"
         Send-Event 'DeviceState' $state
     }
 }
@@ -278,7 +330,7 @@ function Get-StorageFolder {
             }
         }
     }
-    throw (New-Object System.IO.IOException 'The iPhone is not connected, or it is locked.')
+    throw (New-Object System.IO.IOException ('{0} is not connected, or it is locked.' -f (Get-SourceName)))
 }
 
 function Test-SourceAvailable {
@@ -317,50 +369,177 @@ function Wait-ForDevice {
     }
 }
 
-function Get-TopFolderItem {
+function Get-UnitPath {
+    # Where a unit is inside the source. Usually its own name; a whole drive is '', and an
+    # Android chat app's media lives deep inside Android\media.
     param([string] $Name)
-    $root = Get-StorageFolder
-    foreach ($item in $root.Items()) {
-        if ($item.IsFolder -and $item.Name -eq $Name) { return $item }
+    if ($script:Units.ContainsKey($Name)) { return [string] $script:Units[$Name] }
+    return $Name
+}
+
+function Get-SourceFolder {
+    # The shell folder at a path inside the source, walked from the top one level at a time
+    # (a phone cannot be asked for a deep path directly).
+    param([string] $Path)
+    $folder = Get-StorageFolder
+    foreach ($part in @($Path -split '\\' | Where-Object { $_ })) {
+        $next = $null
+        foreach ($item in $folder.Items()) { if ($item.IsFolder -and $item.Name -eq $part) { $next = $item; break } }
+        if ($null -eq $next) { throw "The folder '$Path' is no longer there." }
+        $folder = $next.GetFolder
     }
-    throw "The folder '$Name' is no longer there."
+    return $folder
+}
+
+function Get-UnitFolder { param([string] $Name) return (Get-SourceFolder (Get-UnitPath $Name)) }
+
+function New-FileItem {
+    # Stands in for a shell item for a file on the PC: reading the disk directly is many times
+    # faster than asking the shell about every file. Everything that reads an item only needs
+    # these two properties.
+    param([string] $Path)
+    return @{ IsFileSystem = $true; Path = $Path }
 }
 
 function Get-SourceFile {
     # A fresh handle for one file, after the device hiccupped or came back.
     param($Entry)
-    $parts = @($Entry.Rel -split '\\' | Where-Object { $_ })
-    $folder = (Get-TopFolderItem $parts[0]).GetFolder
-    for ($i = 1; $i -lt $parts.Count; $i++) {
-        $next = $null
-        foreach ($item in $folder.Items()) { if ($item.IsFolder -and $item.Name -eq $parts[$i]) { $next = $item; break } }
-        if ($null -eq $next) { throw "The folder '$($Entry.Rel)' is no longer there." }
-        $folder = $next.GetFolder
+    $unit = [string] $Entry.Unit
+    if (-not $unit) { $unit = @($Entry.Rel -split '\\')[0] }
+    $rest = ''
+    if ($Entry.Rel.Length -gt $unit.Length) { $rest = $Entry.Rel.Substring($unit.Length).TrimStart('\') }
+    $inside = (@((Get-UnitPath $unit), $rest) | Where-Object { $_ }) -join '\'
+    if ($script:Source.Kind -eq 'Folder') {
+        $path = [System.IO.Path]::Combine($script:Source.Path, $inside, $Entry.Name)
+        if (-not [System.IO.File]::Exists($path)) { throw "'$($Entry.Name)' is no longer there." }
+        return (New-FileItem $path)
     }
+    $folder = Get-SourceFolder $inside
     $file = $folder.ParseName($Entry.Name)
     if ($null -eq $file) { throw "'$($Entry.Name)' is no longer there." }
     return $file
+}
+
+function Get-AndroidUnits {
+    # A phone's storage holds the whole phone: apps' files, ringtones, caches. Offered are the
+    # folders people keep things in - each folder of DCIM on its own (Camera, Screenshots ...),
+    # the other top-level folders, and the chat apps' media under a short name. Folders that
+    # start with a dot (.thumbnails, .trashed) are the phone's own bookkeeping and left out.
+    $root = Get-StorageFolder
+    $top = [ordered] @{}
+    foreach ($item in $root.Items()) {
+        $n = [string] $item.Name
+        if ($item.IsFolder -and -not $n.StartsWith('.') -and $ANDROID_SKIP -notcontains $n) { $top[$n] = $item }
+    }
+    $media = New-Object System.Collections.ArrayList
+    $rest = New-Object System.Collections.ArrayList
+    foreach ($n in ($top.Keys | Sort-Object)) {
+        if ($n -eq 'DCIM') {
+            foreach ($sub in ($top[$n].GetFolder.Items() | Sort-Object { $_.Name })) {
+                if (-not $sub.IsFolder -or ([string] $sub.Name).StartsWith('.')) { continue }
+                $u = 'DCIM\' + $sub.Name
+                $script:Units[$u] = $u
+                if ($sub.Name -eq 'Camera') { $media.Insert(0, $u) } else { [void] $media.Add($u) }
+            }
+            continue
+        }
+        $script:Units[$n] = $n
+        if (@('Pictures', 'Movies', 'Screenshots', 'WhatsApp', 'Telegram', 'Camera') -contains $n) { [void] $media.Add($n) } else { [void] $rest.Add($n) }
+    }
+    foreach ($app in $ANDROID_APPS) {
+        if ($script:Units.ContainsKey($app.Name)) { continue }   # an older phone keeps it at the top
+        try { [void] (Get-SourceFolder $app.Path); $script:Units[$app.Name] = $app.Path; [void] $media.Add($app.Name) } catch { }
+    }
+    return [string[]] @($media + $rest)
+}
+
+function Get-DriveUnitName {
+    # A whole drive is copied into a folder named after it, like "USB DRIVE (E)".
+    param([string] $Root)
+    $label = ''
+    try { $label = (New-Object System.IO.DriveInfo($Root)).VolumeLabel } catch { }
+    $letter = $Root.TrimEnd('\').TrimEnd(':')
+    if ($Root.StartsWith('\\')) { return (Get-SafeName (Split-Path -Leaf $Root.TrimEnd('\'))) }
+    if (-not $label) { $label = 'Drive' }
+    return (Get-SafeName ('{0} ({1})' -f $label, $letter))
 }
 
 # ---------------------------------------------------------------------------
 # scanning
 # ---------------------------------------------------------------------------
 
+function Add-ScannedEntry {
+    param($Entry, $List)
+    [void] $List.Add($Entry)
+    $P.ScanFiles = [int64] $P.ScanFiles + 1
+    $P.ScanBytes = [int64] $P.ScanBytes + $Entry.Size
+    $P.FolderFiles = [int64] $P.FolderFiles + 1
+}
+
 function Read-FolderEntries {
-    param($Folder, [string] $Rel, $List)
+    # A phone, through the shell. On Android, names starting with a dot are the phone's own
+    # bookkeeping (.thumbnails, .trashed-... files in the bin) and are left out.
+    param($Folder, [string] $Rel, [string] $Unit, $List)
+    $android = ($script:Source.DeviceKind -eq 'Android')
     foreach ($item in $Folder.Items()) {
         Assert-NotCancelled
+        if ($android -and ([string] $item.Name).StartsWith('.')) { continue }
         if ($item.IsFolder) {
-            Read-FolderEntries -Folder $item.GetFolder -Rel (Join-Path $Rel $item.Name) -List $List
+            Read-FolderEntries -Folder $item.GetFolder -Rel (Join-Path $Rel $item.Name) -Unit $Unit -List $List
             continue
         }
         if ($sync.DemoScanDelayMs) { Start-Sleep -Milliseconds $sync.DemoScanDelayMs }   # tutorial recording only
-        $entry = New-Entry $item $Rel
-        [void] $List.Add($entry)
-        $P.ScanFiles = [int64] $P.ScanFiles + 1
-        $P.ScanBytes = [int64] $P.ScanBytes + $entry.Size
-        $P.FolderFiles = [int64] $P.FolderFiles + 1
+        Add-ScannedEntry -Entry (New-Entry $item $Rel $Unit) -List $List
     }
+}
+
+function Test-SkipOnDisk {
+    # Left out of a folder on the PC: what Windows hides as both hidden and system
+    # ($RECYCLE.BIN, System Volume Information, pagefile.sys, desktop.ini), and - when it plays
+    # the part of a phone - this app's own records. A folder copy takes those records along:
+    # copied or moved photos keep their fingerprints and freed-up history with them.
+    # Junctions are not followed, so a loop in the folder tree cannot make the copy endless.
+    param($Info)
+    $hiddenSystem = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+    if (($Info.Attributes -band $hiddenSystem) -eq $hiddenSystem) { return $true }
+    if ($Info -is [System.IO.DirectoryInfo]) {
+        if ($Info.Name -eq '.iphone-transfer' -and $script:Mode -ne 'Files') { return $true }
+        if ($Info.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return $true }
+    }
+    return $false
+}
+
+function Read-DirectoryEntries {
+    # A folder on the PC, read straight from the disk. A sub-folder that cannot be opened (no
+    # permission) is noted in $Skipped and left out instead of failing the whole folder.
+    param([string] $Directory, [string] $Rel, [string] $Unit, $List, $Skipped)
+    $info = New-Object System.IO.DirectoryInfo($Directory)
+    try { $files = $info.GetFiles(); $subs = $info.GetDirectories() }
+    catch {
+        if ($Rel -eq $Unit) { throw }
+        [void] $Skipped.Add($Rel)
+        Write-Log "left out (cannot be opened): $Directory - $(Get-ErrorText $_)"
+        return
+    }
+    $inside = 0
+    foreach ($f in $files) {
+        Assert-NotCancelled
+        if (Test-SkipOnDisk $f) { continue }
+        $inside++
+        $extension = $f.Extension.ToLowerInvariant()
+        $entry = @{
+            Name = $f.Name; Rel = $Rel; Unit = $Unit; Ext = $extension; Cat = (Get-Category $extension); Size = $f.Length
+            Mod = $f.LastWriteTimeUtc; Cre = $f.CreationTimeUtc; Item = (New-FileItem $f.FullName)
+        }
+        Add-ScannedEntry -Entry $entry -List $List
+    }
+    foreach ($d in $subs) {
+        if (Test-SkipOnDisk $d) { continue }
+        $inside++
+        Read-DirectoryEntries -Directory $d.FullName -Rel (Join-Path $Rel $d.Name) -Unit $Unit -List $List -Skipped $Skipped
+    }
+    # An empty folder holds no file to copy, but it is part of the tree: the copy makes it too.
+    if ($inside -eq 0 -and $Rel -ne $Unit) { [void] $script:LastEmptyDirs.Add($Rel) }
 }
 
 function Read-TopFolder {
@@ -371,9 +550,15 @@ function Read-TopFolder {
         $attempt++
         $P.ScanFiles = $beforeFiles; $P.ScanBytes = $beforeBytes; $P.FolderFiles = [int64] 0
         $list = New-Object System.Collections.ArrayList
+        $script:LastSkipped = New-Object System.Collections.ArrayList
+        $script:LastEmptyDirs = New-Object System.Collections.ArrayList
         try {
-            $item = Get-TopFolderItem $Name
-            Read-FolderEntries -Folder $item.GetFolder -Rel $Name -List $list
+            if ($script:Source.Kind -eq 'Folder') {
+                $directory = [System.IO.Path]::Combine($script:Source.Path, (Get-UnitPath $Name))
+                if (-not [System.IO.Directory]::Exists($directory)) { throw "The folder '$directory' is no longer there." }
+                Read-DirectoryEntries -Directory $directory -Rel $Name -Unit $Name -List $list -Skipped $script:LastSkipped
+            }
+            else { Read-FolderEntries -Folder (Get-UnitFolder $Name) -Rel $Name -Unit $Name -List $list }
             # An iPhone often lists a folder as empty the first time it is asked.
             if ($list.Count -eq 0 -and $script:Source.Kind -eq 'Device' -and $attempt -eq 1) { Start-Sleep -Seconds 3; continue }
             return , $list
@@ -394,9 +579,10 @@ function Read-TopFolder {
 function Get-FolderSummary {
     param([string] $Name, $Cache)
     $record = $script:Folders[$Name]
-    $summary = @{ Name = $Name; Files = 0; Bytes = [int64] 0; Photos = 0; Videos = 0; Other = 0; FirstDate = ''; LastDate = ''; Types = @(); Error = '' }
+    $summary = @{ Name = $Name; Files = 0; Bytes = [int64] 0; Photos = 0; Videos = 0; Other = 0; FirstDate = ''; LastDate = ''; Types = @(); Error = ''; Skipped = 0 }
     if ($null -eq $record) { return $summary }
     $summary.Error = [string] $record.Error
+    $summary.Skipped = @($record.Skipped).Count
     $types = @{}
     $min = $null; $max = $null
     foreach ($e in $record.Files) {
@@ -452,13 +638,13 @@ function Invoke-Scan {
         Send-Event 'FolderScanning' @{ Name = $name }
         try {
             $list = Read-TopFolder $name
-            $script:Folders[$name] = @{ Files = $list; Error = '' }
+            $script:Folders[$name] = @{ Files = $list; Error = ''; Skipped = @($script:LastSkipped); EmptyDirs = @($script:LastEmptyDirs) }
             Write-Log ("scanned {0}: {1} files, {2}" -f $name, $list.Count, (Format-Bytes $P.ScanBytes))
         }
         catch {
             if (Test-Cancelled $_) { $cancelled = $true; break }
             $text = Get-ErrorText $_
-            $script:Folders[$name] = @{ Files = (New-Object System.Collections.ArrayList); Error = $text }
+            $script:Folders[$name] = @{ Files = (New-Object System.Collections.ArrayList); Error = $text; Skipped = @() }
             Write-Log "scan of $name failed: $text"
         }
         Send-Event 'FolderScanned' (Get-FolderSummary -Name $name)
@@ -517,7 +703,9 @@ function Get-AssetKey {
     # its Live Photo video IMG_0077.MOV, the edit IMG_E0077.JPG / IMG_E0077.MOV and the edit
     # instructions IMG_0077.AAE / IMG_O0077.AAE. Deleting any one of them from the phone can
     # remove the whole photo, so they are kept or deleted together.
+    # Ordinary files (files mode) each stand on their own.
     param([string] $Rel, [string] $Name)
+    if ($script:Mode -eq 'Files') { return ($Rel + '|' + $Name).ToLowerInvariant() }
     $stem = [System.IO.Path]::GetFileNameWithoutExtension($Name)
     if ($stem -match '^([A-Za-z]{3}_|[A-Za-z]{4})([EO])?(\d{4,5})$') { $stem = $Matches[1] + $Matches[3] }
     return ($Rel + '|' + $stem).ToLowerInvariant()
@@ -533,7 +721,10 @@ function Update-DestIndex {
     # over time (a photo once in 202605_b can later be listed under 202605_a), so a copy made
     # earlier may sit in a differently named folder. Folders starting with "." (this app's own
     # .iphone-transfer, other apps' trash such as .dtrash) and "$" (system) are left out.
+    # Files mode keeps the folder tree exactly, so a copy is only ever looked for in its own
+    # place - and the destination may be a whole drive, far too big to list.
     $script:DestIndex = @{}
+    if ($script:Mode -eq 'Files') { return }
     if (-not $script:Dest -or -not [System.IO.Directory]::Exists($script:Dest)) { return }
     $count = 0
     $stack = New-Object System.Collections.Stack
@@ -627,9 +818,15 @@ function Find-Copy {
 function Test-Overlap {
     # A destination inside the source (or the source inside it) would let every file count
     # as its own copy - and then be deleted. Path text first; Delete also compares file IDs.
+    # In files mode the copy lands in <destination>\<folder name>, and that is what counts:
+    # copying C:\A\Projects into C:\A is the folder onto itself; into C:\ is fine.
     if (-not $script:Source -or $script:Source.Kind -ne 'Folder' -or -not $script:Dest) { return $false }
-    $src = [System.IO.Path]::GetFullPath($script:Source.Path).TrimEnd('\') + '\'
-    $dst = [System.IO.Path]::GetFullPath($script:Dest).TrimEnd('\') + '\'
+    $root = $script:Source.Root
+    if (-not $root) { $root = $script:Source.Path }
+    $target = $script:Dest
+    if ($script:Mode -eq 'Files' -and $script:Source.Unit) { $target = [System.IO.Path]::Combine($script:Dest, $script:Source.Unit) }
+    $src = [System.IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+    $dst = [System.IO.Path]::GetFullPath($target).TrimEnd('\') + '\'
     return ($dst.StartsWith($src, [StringComparison]::OrdinalIgnoreCase) -or $src.StartsWith($dst, [StringComparison]::OrdinalIgnoreCase))
 }
 
@@ -661,7 +858,7 @@ function Set-Destination {
         try { $session = Get-Content -LiteralPath $sessionPath -Raw | ConvertFrom-Json } catch { }
     }
     if ($session -and $session.State -eq 'copying') {
-        Send-Event 'Session' @{ State = [string] $session.State; Folders = [string[]] @($session.Folders); Started = [string] $session.Started }
+        Send-Event 'Session' @{ State = [string] $session.State; Folders = [string[]] @($session.Folders); Started = [string] $session.Started; Source = [string] $session.Source }
     }
     else { Send-Event 'Session' @{ State = '' } }
 }
@@ -802,7 +999,7 @@ function Copy-ViaExplorer {
     # copy. It reports nothing back, so it gets a private folder and we watch for the file.
     param($Entry, [string] $Staging)
     $private = $Staging + '.d'
-    New-Item -ItemType Directory -Force -Path $private | Out-Null
+    [void] [System.IO.Directory]::CreateDirectory($private)
     $target = $script:Shell.NameSpace($private)
     if ($null -eq $target) { throw "cannot open the staging folder $private" }
     $arrival = Join-Path $private $Entry.Name
@@ -896,14 +1093,18 @@ function Copy-OneFile {
             $expected = $result.Expected
             if ($expected -le 0) { $expected = $entry.Size }
             if ($result.Bytes -le 0 -and $expected -gt 0) { throw 'received 0 bytes' }
-            if ($result.Bytes -le 0 -and $result.Expected -lt 0 -and $script:Source.Kind -eq 'Device') { throw 'received 0 bytes and the iPhone did not say how big the file is' }
+            if ($result.Bytes -le 0 -and $result.Expected -lt 0 -and $script:Source.Kind -eq 'Device') { throw ('received 0 bytes and {0} did not say how big the file is' -f (Get-SourceName)) }
             if ($expected -gt 0 -and $result.Bytes -ne $expected) {
                 $shaky = $true; $resetNeeded = $true
                 throw ('size mismatch: received {0} bytes, expected {1}' -f $result.Bytes, $expected)
             }
+            # Only a phone hands over wrong data; on the PC a .jpg that is really a PNG, or two
+            # identical files in a row, are just what the folder holds.
             $looksWrong = ''
-            if (-not $result.FromExplorer -and -not (Test-Signature $result.Head $entry.Ext)) { $looksWrong = "the data does not look like a $($entry.Ext.TrimStart('.').ToUpperInvariant()) file" }
-            elseif ($script:LastCopy -and $script:LastCopy.Key -ne $key -and $script:LastCopy.Sha -eq $result.Sha) { $looksWrong = "the data is identical to the previous file ($($script:LastCopy.Name))" }
+            if ($script:Source.Kind -eq 'Device') {
+                if (-not $result.FromExplorer -and -not (Test-Signature $result.Head $entry.Ext)) { $looksWrong = "the data does not look like a $($entry.Ext.TrimStart('.').ToUpperInvariant()) file" }
+                elseif ($script:LastCopy -and $script:LastCopy.Key -ne $key -and $script:LastCopy.Sha -eq $result.Sha) { $looksWrong = "the data is identical to the previous file ($($script:LastCopy.Name))" }
+            }
             if ($looksWrong) {
                 if ($suspect -and $suspect -eq $result.Sha) {
                     # A fresh connection gave exactly the same bytes: that is what the file holds.
@@ -926,7 +1127,7 @@ function Copy-OneFile {
             }
 
             Set-FileTimes -Path $staging -Entry $entry
-            New-Item -ItemType Directory -Force -Path $Job.TargetDirectory | Out-Null
+            [void] [System.IO.Directory]::CreateDirectory($Job.TargetDirectory)
             $final = Get-FreeName $Job.Landing
             $status = 'copied'
             if ($final -ne $Job.Landing) { $status = 'renamed' }
@@ -1001,6 +1202,7 @@ function Read-SourceTrusted {
                 if ($expected -le 0) { $expected = $Entry.Size }
                 if ($r.Bytes -le 0 -and $expected -gt 0) { $problem = 'received 0 bytes' }
                 elseif ($expected -gt 0 -and $r.Bytes -ne $expected) { $problem = "received $($r.Bytes) bytes, expected $expected" }
+                elseif ($script:Source.Kind -ne 'Device') { $problem = '' }
                 elseif (-not (Test-Signature $r.Head $Entry.Ext)) {
                     # An unusual file is accepted only if a fresh connection gives exactly the same bytes.
                     if ($repeatSha -and $repeatSha -eq $r.Sha) { $problem = '' }
@@ -1079,13 +1281,13 @@ function Invoke-Copy {
     param([string[]] $Names)
     if (-not $script:Dest) { throw 'No destination chosen.' }
     Assert-NoOverlap
-    New-Item -ItemType Directory -Force -Path $script:Dest | Out-Null
+    [void] [System.IO.Directory]::CreateDirectory($script:Dest)
     $meta = Get-MetaDirectory
-    New-Item -ItemType Directory -Force -Path $meta | Out-Null
+    [void] [System.IO.Directory]::CreateDirectory($meta)
     try { (Get-Item -LiteralPath $meta -Force).Attributes = 'Directory, Hidden' } catch { }
     $staging = Join-Path $meta 'staging'
     if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue }
-    New-Item -ItemType Directory -Force -Path $staging | Out-Null
+    [void] [System.IO.Directory]::CreateDirectory($staging)
     Import-Manifest
     Update-DestIndex
 
@@ -1105,6 +1307,10 @@ function Invoke-Copy {
             $info.ToCopy++; $info.ToCopyBytes += $entry.Size; $bytes += $entry.Size
         }
         $perFolder[$name] = $info
+        foreach ($rel in @($record.EmptyDirs)) {
+            try { [void] [System.IO.Directory]::CreateDirectory((Join-Path $script:Dest $rel)) }
+            catch { Write-Log "could not make the empty folder $rel : $(Get-ErrorText $_)" }
+        }
     }
 
     Reset-Progress -Phase 'Copy' -FilesTotal $jobs.Count -BytesTotal $bytes
@@ -1236,7 +1442,7 @@ function Invoke-Verify {
     Import-Manifest
     Update-DestIndex
     $script:LastCheckRead = $null; $script:UnreliableInARow = 0
-    Reset-Progress -Phase 'Verify' -Step 'Reading the list of files from the iPhone again'
+    Reset-Progress -Phase 'Verify' -Step ('Reading the list of files from {0} again' -f (Get-SourceName))
     $P.FilesTotal = [int64] $Names.Count
 
     $lists = [ordered] @{}
@@ -1305,7 +1511,7 @@ function Invoke-Verify {
             if ($null -eq $copy) {
                 $record.Status = 'Missing'; $record.Detail = 'not on the PC'
                 $why = $script:Unavailable[(Get-EntryKey $entry)]
-                if ($why) { $record.Detail = 'not on the PC - the iPhone lists it but would not hand it over (' + $why + ')' }
+                if ($why) { $record.Detail = ('not on the PC - {0} lists it but would not hand it over ({1})' -f (Get-SourceName), $why) }
             }
             else {
                 $key = Get-EntryKey $entry
@@ -1324,11 +1530,11 @@ function Invoke-Verify {
                         $lastReadProblem = $phone.Error
                         $phone = $null
                         $record.Status = 'Unreadable'
-                        $record.Detail = 'the iPhone did not give a reliable read (' + $lastReadProblem + ') - unplug and replug it, then check again'
+                        $record.Detail = ('{0} did not give a reliable read ({1}) - unplug and replug it, then check again' -f (Get-SourceName), $lastReadProblem)
                     }
                     else {
                         $expected = $phone.Sha
-                        if ($script:Source.Kind -eq 'Device') { $how = 'read from the iPhone again' } else { $how = 'read from the source again' }
+                        $how = 'read from {0} again' -f (Get-SourceName)
                     }
                 }
                 else { $expected = $copy.Sha; $how = 'fingerprint from the copy' }
@@ -1414,7 +1620,7 @@ function Save-CheckReport {
     param($Summaries, $Results, [bool] $Full)
     try {
         $meta = Get-MetaDirectory
-        New-Item -ItemType Directory -Force -Path $meta | Out-Null
+        [void] [System.IO.Directory]::CreateDirectory($meta)
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         $csvPath = Join-Path $meta "check-$stamp.csv"
         $htmlPath = Join-Path $meta "check-$stamp.html"
@@ -1428,7 +1634,7 @@ function Save-CheckReport {
 
         $okAll = (@($Summaries | Where-Object { -not $_.Ok }).Count -eq 0)
         $h = New-Object System.Text.StringBuilder
-        [void] $h.Append('<!doctype html><html><head><meta charset="utf-8"><title>iPhone Transfer - check report</title><style>')
+        [void] $h.Append('<!doctype html><html><head><meta charset="utf-8"><title>Smart Transfer - check report</title><style>')
         [void] $h.Append('body{font-family:Segoe UI,Arial,sans-serif;margin:32px;color:#0f172a;background:#f8fafc}h1{font-size:24px;margin:0 0 4px}')
         [void] $h.Append('.sub{color:#64748b;margin-bottom:24px}.verdict{padding:16px 20px;border-radius:10px;font-size:17px;margin-bottom:24px}')
         [void] $h.Append('.good{background:#dcfce7;color:#14532d}.bad{background:#fef3c7;color:#78350f}table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:24px}')
@@ -1441,7 +1647,7 @@ function Save-CheckReport {
         foreach ($s in $Summaries) { $totalFiles += $s.PhoneFiles; $totalOk += $s.OkFiles }
         if ($okAll) { [void] $h.Append('<div class="verdict good">Everything matches: ' + $totalOk + ' of ' + $totalFiles + ' files are safely on the PC.</div>') }
         else { [void] $h.Append('<div class="verdict bad">' + ($totalFiles - $totalOk) + ' of ' + $totalFiles + ' files need attention - see below. Folders with problems are not offered for deleting.</div>') }
-        [void] $h.Append('<table><tr><th>Folder</th><th>On the iPhone</th><th>On the PC</th><th>Matching</th><th>Result</th></tr>')
+        [void] $h.Append('<table><tr><th>Folder</th><th>' + (ConvertTo-Html (Get-SourceColumn)) + '</th><th>Copy</th><th>Matching</th><th>Result</th></tr>')
         foreach ($s in $Summaries) {
             $cls = 'no'; $res = 'needs attention'
             if ($s.Ok) { $cls = 'ok'; $res = 'all files match' }
@@ -1450,7 +1656,7 @@ function Save-CheckReport {
         }
         [void] $h.Append('</table>')
         foreach ($s in $Summaries) {
-            [void] $h.Append('<details><summary>' + (ConvertTo-Html $s.Name) + ' - ' + $s.PhoneFiles + ' files</summary><table><tr><th>File</th><th>iPhone size</th><th>PC size</th><th>Result</th><th>How</th></tr>')
+            [void] $h.Append('<details><summary>' + (ConvertTo-Html $s.Name) + ' - ' + $s.PhoneFiles + ' files</summary><table><tr><th>File</th><th>Size</th><th>Copy size</th><th>Result</th><th>How</th></tr>')
             foreach ($r in ($Results | Where-Object { $_.Folder -eq $s.Name })) {
                 $cls = 'ok'; if ($r.Status -ne 'OK') { $cls = 'no' }
                 $pcSize = ''; if ($r.DestSize -ge 0) { $pcSize = $r.DestSize.ToString('N0', $script:Invariant) }
@@ -1515,7 +1721,7 @@ function Invoke-Compare {
     $report = ''
     try {
         $meta = Get-MetaDirectory
-        New-Item -ItemType Directory -Force -Path $meta | Out-Null
+        [void] [System.IO.Directory]::CreateDirectory($meta)
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         $csv = New-Object System.Text.StringBuilder
         [void] $csv.AppendLine('folder,name,size_bytes,date,result,found_at')
@@ -1523,7 +1729,7 @@ function Invoke-Compare {
         [System.IO.File]::WriteAllText((Join-Path $meta "compare-$stamp.csv"), $csv.ToString(), (New-Object System.Text.UTF8Encoding($false)))
 
         $h = New-Object System.Text.StringBuilder
-        [void] $h.Append('<!doctype html><html><head><meta charset="utf-8"><title>iPhone Transfer - compare</title><style>')
+        [void] $h.Append('<!doctype html><html><head><meta charset="utf-8"><title>Smart Transfer - compare</title><style>')
         [void] $h.Append('body{font-family:Segoe UI,Arial,sans-serif;margin:32px;color:#0f172a;background:#f8fafc}h1{font-size:24px;margin:0 0 4px}.sub{color:#64748b;margin-bottom:24px}')
         [void] $h.Append('table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:24px}th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:13px}th{background:#f1f5f9}')
         [void] $h.Append('.ok{color:#15803d}.away{color:#1d4ed8}.no{color:#b45309;font-weight:600}td.num{text-align:right}details{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;margin-bottom:10px}summary{cursor:pointer;font-weight:600}</style></head><body>')
@@ -1555,21 +1761,45 @@ function Invoke-Compare {
 # delete command
 # ---------------------------------------------------------------------------
 
+function Remove-EmptyFolders {
+    # After a move, the folders the files came out of are left empty: remove those (only empty
+    # ones, deepest first). A whole drive itself is of course kept.
+    param([string] $Name)
+    $top = [System.IO.Path]::Combine($script:Source.Path, (Get-UnitPath $Name))
+    if (-not [System.IO.Directory]::Exists($top)) { return }
+    $dirs = New-Object System.Collections.ArrayList
+    $stack = New-Object System.Collections.Stack
+    $stack.Push((New-Object System.IO.DirectoryInfo($top)))
+    while ($stack.Count -gt 0) {
+        $d = $stack.Pop()
+        [void] $dirs.Add($d.FullName)
+        try { foreach ($s in $d.GetDirectories()) { if (-not (Test-SkipOnDisk $s)) { $stack.Push($s) } } } catch { }
+    }
+    $isDriveRoot = ($top.TrimEnd('\') -eq ([System.IO.Path]::GetPathRoot($top)).TrimEnd('\'))
+    foreach ($dir in ($dirs | Sort-Object { $_.Length } -Descending)) {
+        if ($isDriveRoot -and $dir -eq $top) { continue }
+        try {
+            if (@([System.IO.Directory]::EnumerateFileSystemEntries($dir)).Count -eq 0) { [System.IO.Directory]::Delete($dir); Write-Log "delete: removed the empty folder $dir" }
+        }
+        catch { }
+    }
+}
+
 function Invoke-Delete {
     # Deletes files from the source - only in folders that passed the check, only files that
     # passed it, and only after confirming once more that each copy is still on the PC.
     param([string[]] $Names)
     Assert-NoOverlap
     $allowUndo = ($script:Source.Kind -eq 'Folder')   # an ordinary folder can use the Recycle Bin; a phone cannot
-    if ($sync.DemoMode) { $allowUndo = $false }       # the tutorial's made-up photos are not worth a Recycle Bin
+    if ($sync.DemoMode -or $sync.NoRecycle) { $allowUndo = $false }   # made-up demo and test files are not worth a Recycle Bin
     $files = [int64] 0; $bytes = [int64] 0
     foreach ($name in $Names) {
         $v = $script:Verified[$name]
         if ($v -and $v.Deletable -gt 0) { $files += $v.Deletable; foreach ($r in $v.Files.Values) { $bytes += $r.Size } }
     }
-    Reset-Progress -Phase 'Delete' -FilesTotal $files -BytesTotal $bytes -Step 'Deleting from the iPhone'
+    Reset-Progress -Phase 'Delete' -FilesTotal $files -BytesTotal $bytes -Step ('Removing the originals from {0}' -f (Get-SourceName))
 
-    New-Item -ItemType Directory -Force -Path (Get-MetaDirectory) | Out-Null
+    [void] [System.IO.Directory]::CreateDirectory((Get-MetaDirectory))
     $logPath = Join-Path (Get-MetaDirectory) 'deleted-from-source.csv'
     $isNew = -not (Test-Path -LiteralPath $logPath)
     $writer = New-Object System.IO.StreamWriter($logPath, $true, (New-Object System.Text.UTF8Encoding($false)))
@@ -1597,23 +1827,30 @@ function Invoke-Delete {
             $kept = 0
             # A fresh listing: anything added since the check is left alone.
             $items = New-Object System.Collections.ArrayList
-            $top = $null
-            while ($null -eq $top) {
-                try { $top = Get-TopFolderItem $name }
-                catch {
-                    if ($script:Source.Kind -eq 'Device' -and -not (Test-SourceAvailable)) {
-                        if (-not (Wait-ForDevice)) { throw (New-Object System.OperationCanceledException) }
-                    }
-                    else { throw }
-                }
+            if ($script:Source.Kind -eq 'Folder') {
+                foreach ($e in (Read-TopFolder $name)) { [void] $items.Add(@($e.Item, $e.Rel)) }
             }
-            $stack = New-Object System.Collections.Stack
-            $stack.Push(@($top.GetFolder, $name))
-            while ($stack.Count -gt 0) {
-                $pair = $stack.Pop()
-                foreach ($item in $pair[0].Items()) {
-                    if ($item.IsFolder) { $stack.Push(@($item.GetFolder, (Join-Path $pair[1] $item.Name))); continue }
-                    [void] $items.Add(@($item, $pair[1]))
+            else {
+                $top = $null
+                while ($null -eq $top) {
+                    try { $top = Get-UnitFolder $name }
+                    catch {
+                        if (-not (Test-SourceAvailable)) {
+                            if (-not (Wait-ForDevice)) { throw (New-Object System.OperationCanceledException) }
+                        }
+                        else { throw }
+                    }
+                }
+                $android = ($script:Source.DeviceKind -eq 'Android')
+                $stack = New-Object System.Collections.Stack
+                $stack.Push(@($top, $name))
+                while ($stack.Count -gt 0) {
+                    $pair = $stack.Pop()
+                    foreach ($item in $pair[0].Items()) {
+                        if ($android -and ([string] $item.Name).StartsWith('.')) { continue }
+                        if ($item.IsFolder) { $stack.Push(@($item.GetFolder, (Join-Path $pair[1] $item.Name))); continue }
+                        [void] $items.Add(@($item, $pair[1]))
+                    }
                 }
             }
 
@@ -1657,7 +1894,10 @@ function Invoke-Delete {
                 }
 
                 $result = 'deleted'
-                try { [IPhoneTransferApp.Native]::DeleteItem($item, $allowUndo) }
+                try {
+                    if ($item -is [hashtable]) { [IPhoneTransferApp.Native]::DeletePath($item.Path, $allowUndo) }
+                    else { [IPhoneTransferApp.Native]::DeleteItem($item, $allowUndo) }
+                }
                 catch {
                     $result = 'failed: ' + (Get-ErrorText $_)
                     if ($script:Source.Kind -eq 'Device' -and -not (Test-SourceAvailable)) {
@@ -1679,8 +1919,10 @@ function Invoke-Delete {
             }
             }   # passes
 
+            if ($script:Mode -eq 'Files') { Remove-EmptyFolders $name }
             $remaining = -1
-            try { $remaining = (Read-TopFolder $name).Count } catch { }
+            if ($script:Source.Kind -eq 'Folder' -and -not [System.IO.Directory]::Exists([System.IO.Path]::Combine($script:Source.Path, (Get-UnitPath $name)))) { $remaining = 0 }
+            else { try { $remaining = (Read-TopFolder $name).Count } catch { } }
             $script:Verified.Remove($name)
             $totalDeleted += $deleted; $totalDeletedBytes += $deletedBytes; $totalKept += $kept; $totalFailed += $failedHere
             Write-Log ("delete {0}: {1} deleted ({2}), {3} kept, {4} failed, {5} left in the folder" -f $name, $deleted, (Format-Bytes $deletedBytes), $kept, $failedHere, $remaining)
@@ -1699,7 +1941,29 @@ function Invoke-EngineCommand {
     param($Command)
     switch ($Command.Name) {
         'SetSource' {
-            if ($Command.Kind -eq 'Folder') {
+            $script:Units = @{}
+            $script:Mode = 'Photos'
+            if ($Command.Kind -eq 'Folder' -and $Command.Layout -eq 'Tree') {
+                # Files mode: the chosen folder is copied as it is, into <destination>\<its name>.
+                # A whole drive goes into a folder named after the drive.
+                $full = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $Command.Path).ProviderPath)
+                $root = [System.IO.Path]::GetPathRoot($full)
+                if ($full.TrimEnd('\') -eq $root.TrimEnd('\')) {
+                    $unit = Get-DriveUnitName $root
+                    $script:Units[$unit] = ''
+                    $script:Source = @{ Kind = 'Folder'; Path = $root; Root = $root; Unit = $unit; Label = $root }
+                }
+                else {
+                    $full = $full.TrimEnd('\')
+                    $unit = Split-Path -Leaf $full
+                    $script:Source = @{ Kind = 'Folder'; Path = (Split-Path -Parent $full); Root = $full; Unit = $unit; Label = $full }
+                }
+                $script:Mode = 'Files'
+                $names = @($unit)
+                $looseFiles = 0
+                $capacity = [IPhoneTransferApp.Native]::GetTotalBytes($root)
+            }
+            elseif ($Command.Kind -eq 'Folder') {
                 $path = (Resolve-Path -LiteralPath $Command.Path).ProviderPath.TrimEnd('\')
                 $label = $path
                 $names = @(Get-ChildItem -LiteralPath $path -Directory -Force | Where-Object { -not $_.Name.StartsWith('.') } | ForEach-Object { $_.Name } | Sort-Object)
@@ -1712,22 +1976,29 @@ function Invoke-EngineCommand {
                     $path = $parent
                     $looseFiles = 0
                 }
-                $script:Source = @{ Kind = 'Folder'; Path = $path; Label = $label }
+                $script:Source = @{ Kind = 'Folder'; Path = $path; Root = $path; Label = $label }
                 $capacity = [IPhoneTransferApp.Native]::GetTotalBytes($path)
                 if ($looseFiles -gt 0) { Write-Log "source: $looseFiles files directly in $path are not part of any folder and are left out" }
             }
             else {
-                $state = Get-DeviceState
-                if ($state.State -ne 'Ready') { throw 'The iPhone is not ready - unlock it and tap Trust.' }
-                $script:Source = @{ Kind = 'Device'; Device = $state.Device; Storage = $state.Storage; Label = ('{0}\{1}' -f $state.Device, $state.Storage) }
-                $names = $state.Folders
+                $kind = [string] $Command.DeviceKind
+                if (-not $kind) { $kind = 'iPhone' }
+                $script:Source = @{ Kind = 'Device'; DeviceKind = $kind }
+                $state = Get-DeviceState -Kind $kind
+                if ($state.State -ne 'Ready') { throw ('{0} is not ready - unlock it (and tap Trust or Allow if it asks).' -f (Get-SourceName)) }
+                $storage = $state.Storages | Where-Object { $_.Name -eq $Command.Storage } | Select-Object -First 1
+                if (-not $storage) { $storage = $state.Storages[0] }
+                $script:Source = @{ Kind = 'Device'; DeviceKind = $kind; Device = $state.Device; Storage = $storage.Name; Label = ('{0}\{1}' -f $state.Device, $storage.Name) }
+                if ($kind -eq 'Android') { $names = Get-AndroidUnits } else { $names = $storage.Folders }
                 $looseFiles = 0
-                $capacity = $state.Capacity
+                $capacity = $storage.Capacity
             }
             $script:Folders = @{}
             $script:Verified = @{}
-            Write-Log "source: $($script:Source.Label) ($($names.Count) folders)"
-            Send-Event 'FolderList' @{ Names = [string[]] $names; Label = $script:Source.Label; Kind = $script:Source.Kind; Capacity = $capacity; LooseFiles = $looseFiles }
+            Write-Log "source: $($script:Source.Label) ($($names.Count) folders, $($script:Mode) mode)"
+            $paths = @{}
+            foreach ($n in $names) { $paths[$n] = Get-UnitPath $n }
+            Send-Event 'FolderList' @{ Names = [string[]] $names; Label = $script:Source.Label; Kind = $script:Source.Kind; DeviceKind = [string] $script:Source.DeviceKind; Mode = $script:Mode; Root = [string] $script:Source.Root; Paths = $paths; Capacity = $capacity; LooseFiles = $looseFiles }
         }
         'SetDestination' { Set-Destination $Command.Path }
         'Scan'           { Invoke-Scan -Names $Command.Folders }
@@ -1742,7 +2013,7 @@ function Invoke-EngineCommand {
 function Start-Engine {
     try {
         if ($sync.LogPath) {
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $sync.LogPath) | Out-Null
+            [void] [System.IO.Directory]::CreateDirectory((Split-Path -Parent $sync.LogPath))
             $script:Log = New-Object System.IO.StreamWriter($sync.LogPath, $true, (New-Object System.Text.UTF8Encoding($false)))
             $script:Log.AutoFlush = $true
         }

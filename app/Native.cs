@@ -1,4 +1,4 @@
-// Native helpers for the iPhone Transfer app. Compiled at start-up by Add-Type
+// Native helpers for the Smart Transfer app. Compiled at start-up by Add-Type
 // (Windows PowerShell 5.1 uses the C# 5 compiler, so no newer syntax here).
 
 using System;
@@ -55,6 +55,7 @@ namespace IPhoneTransferApp
         const uint FOF_NOCONFIRMATION = 0x10;
         const uint FOF_ALLOWUNDO = 0x40;
         const uint FOF_NOERRORUI = 0x400;
+        const uint FOF_WANTNUKEWARNING = 0x4000;
         const uint FOFX_EARLYFAILURE = 0x00100000;
 
         const uint ES_CONTINUOUS = 0x80000000;
@@ -170,11 +171,55 @@ namespace IPhoneTransferApp
             finally { Marshal.ReleaseComObject(item); }
         }
 
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+        static extern IShellItem SHCreateItemFromParsingName([MarshalAs(UnmanagedType.LPWStr)] string pszPath, IntPtr pbc, [In] ref Guid riid);
+
         // Deletes one shell item without any dialog. Throws when the shell refuses or aborts.
         // allowUndo sends ordinary files to the Recycle Bin; a phone has no Recycle Bin.
         public static void DeleteItem(object folderItem, bool allowUndo)
         {
-            IShellItem item = ItemFromObject(folderItem);
+            Delete(ItemFromObject(folderItem), allowUndo);
+        }
+
+        // The same for a file on the PC, by its path.
+        public static void DeletePath(string path, bool allowUndo)
+        {
+            Guid iid = IID_IShellItem;
+            Delete(SHCreateItemFromParsingName(path, IntPtr.Zero, ref iid), allowUndo);
+        }
+
+        // Several files or folders in one go, without dialogs - except Windows' own warning when
+        // one is too big for the Recycle Bin and would be destroyed instead. Items that fail are
+        // left alone: the caller looks at what is still there.
+        public static void DeletePaths(string[] paths, bool allowUndo)
+        {
+            IFileOperation op = (IFileOperation)Activator.CreateInstance(Type.GetTypeFromCLSID(CLSID_FileOperation));
+            System.Collections.Generic.List<IShellItem> items = new System.Collections.Generic.List<IShellItem>();
+            try
+            {
+                uint flags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI;
+                if (allowUndo) flags |= FOF_ALLOWUNDO | FOF_WANTNUKEWARNING;
+                op.SetOperationFlags(flags);
+                Guid iid = IID_IShellItem;
+                foreach (string path in paths)
+                {
+                    IShellItem item;
+                    try { item = SHCreateItemFromParsingName(path, IntPtr.Zero, ref iid); }
+                    catch (Exception) { continue; }
+                    items.Add(item);
+                    op.DeleteItem(item, IntPtr.Zero);
+                }
+                if (items.Count > 0) { try { op.PerformOperations(); } catch (Exception) { } }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(op);
+                foreach (IShellItem item in items) Marshal.ReleaseComObject(item);
+            }
+        }
+
+        static void Delete(IShellItem item, bool allowUndo)
+        {
             IFileOperation op = null;
             try
             {
