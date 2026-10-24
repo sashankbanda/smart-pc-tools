@@ -35,6 +35,7 @@ param(
     [string] $AutoStopAfter = 'Check',
     [switch] $AutoFullCheck,
     [switch] $AutoInterrupt,
+    [switch] $AutoCompare,
     [string] $ScreenshotDir = ''
 )
 
@@ -441,18 +442,27 @@ function Save-Settings {
 
         <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,14,0,0" Padding="20,14">
           <Grid>
-            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal">
-              <TextBlock Style="{StaticResource Icon}" Text="&#xE8B7;" FontSize="18" Foreground="#2563EB"/>
-              <TextBlock Text="Save to" Style="{StaticResource Label}" Margin="10,0,8,0" VerticalAlignment="Center"/>
-              <TextBlock x:Name="DestText" Text="" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="520"/>
+            <DockPanel Grid.Row="0" Grid.Column="0" Margin="0,0,12,10" LastChildFill="True">
+              <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE8EA;" FontSize="18" Foreground="#2563EB" Width="20"/>
+              <TextBlock DockPanel.Dock="Left" Text="Copy from" Style="{StaticResource Label}" Margin="10,0,8,0" VerticalAlignment="Center" Width="62"/>
+              <TextBlock x:Name="SourceText" Text="" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+            <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10">
+              <Button x:Name="UseIPhoneButton" Content="Use the iPhone" Style="{StaticResource Small}" Margin="0,0,8,0"/>
+              <Button x:Name="ChangeSourceButton" Content="Choose a folder..." Style="{StaticResource Small}"/>
             </StackPanel>
-            <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal">
+            <DockPanel Grid.Row="1" Grid.Column="0" Margin="0,0,12,0" LastChildFill="True">
+              <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE8B7;" FontSize="18" Foreground="#2563EB" Width="20"/>
+              <TextBlock DockPanel.Dock="Left" Text="Save to" Style="{StaticResource Label}" Margin="10,0,8,0" VerticalAlignment="Center" Width="62"/>
+              <TextBlock x:Name="DestText" Text="" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal">
               <Button x:Name="OpenDestButton" Content="Open" Style="{StaticResource Small}" Margin="0,0,8,0"/>
               <Button x:Name="ChangeDestButton" Content="Change..." Style="{StaticResource Small}"/>
             </StackPanel>
-            <Grid Grid.Row="1" Grid.ColumnSpan="2" Margin="0,12,0,0" Height="12">
+            <Grid x:Name="SpaceArea" Grid.Row="2" Grid.ColumnSpan="2" Margin="0,12,0,0" Height="12">
               <Border CornerRadius="6" Background="#E2E8F0"/>
               <Grid x:Name="SpaceBar" ClipToBounds="True">
                 <Grid.ColumnDefinitions>
@@ -464,8 +474,8 @@ function Save-Settings {
                 <Border x:Name="SpaceNeedFill" Grid.Column="1" Background="#2563EB"/>
               </Grid>
             </Grid>
-            <TextBlock x:Name="SpaceText" Grid.Row="2" Grid.Column="0" Margin="0,8,0,0" FontSize="13" Foreground="#475569" TextWrapping="Wrap"/>
-            <WrapPanel x:Name="DrivePanel" Grid.Row="2" Grid.Column="1" Margin="0,6,0,0" HorizontalAlignment="Right"/>
+            <TextBlock x:Name="SpaceText" Grid.Row="3" Grid.Column="0" Margin="0,8,0,0" FontSize="13" Foreground="#475569" TextWrapping="Wrap"/>
+            <WrapPanel x:Name="DrivePanel" Grid.Row="3" Grid.Column="1" Margin="0,6,0,0" HorizontalAlignment="Right"/>
           </Grid>
         </Border>
 
@@ -537,7 +547,11 @@ function Save-Settings {
               <TextBlock x:Name="SelectionText" Text="No folders selected yet" FontWeight="SemiBold" FontSize="15" TextWrapping="Wrap"/>
               <TextBlock x:Name="SelectionDetail" Text="" Foreground="#64748B" FontSize="13" TextWrapping="Wrap" Margin="0,2,0,0"/>
             </StackPanel>
-            <Button x:Name="StartCopyButton" Grid.Column="1" Content="Copy selected folders" Style="{StaticResource Primary}" IsEnabled="False" MinWidth="200" Margin="16,0,0,0"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button x:Name="CompareButton" Content="Compare only" Style="{StaticResource Secondary}" IsEnabled="False" Margin="16,0,0,0"
+                      ToolTip="List every file of the selected folders and where it is on this PC - nothing is copied"/>
+              <Button x:Name="StartCopyButton" Content="Copy selected folders" Style="{StaticResource Primary}" IsEnabled="False" MinWidth="200" Margin="10,0,0,0"/>
+            </StackPanel>
           </Grid>
         </Border>
       </Grid>
@@ -933,6 +947,7 @@ function Select-FolderDialog {
 
 function Open-Path {
     param([string] $Path)
+    if ($AutoPilot) { Write-UiLog "would open: $Path"; return }
     if ($Path -and (Test-Path -LiteralPath $Path)) { Start-Process -FilePath $Path }
 }
 
@@ -1019,27 +1034,69 @@ function Start-Analysis {
 # ---------------------------------------------------------------------------
 
 function Get-DefaultDestination {
+    # No silent default: the user chooses where the photos go. Afterwards it is remembered.
     if ($Destination) { return $Destination }
-    if ($settings.LastDestination) { return $settings.LastDestination }
-    return (Join-Path ([Environment]::GetFolderPath('MyPictures')) 'iPhone')
+    if ($AutoPilot) { return '' }   # test runs never use a real user's saved destination
+    if ($settings.LastDestination -and (Test-Path -LiteralPath $settings.LastDestination)) { return $settings.LastDestination }
+    return ''
+}
+
+function Test-Inside {
+    # Is one of the two folders the same as, or inside, the other?
+    param([string] $A, [string] $B)
+    $a2 = [System.IO.Path]::GetFullPath($A).TrimEnd('\') + '\'
+    $b2 = [System.IO.Path]::GetFullPath($B).TrimEnd('\') + '\'
+    return ($a2.StartsWith($b2, [StringComparison]::OrdinalIgnoreCase) -or $b2.StartsWith($a2, [StringComparison]::OrdinalIgnoreCase))
+}
+
+function Show-NoDestination {
+    $ui.DestText.Text = 'Not chosen yet - choose the folder to save into'
+    Set-Color $ui.DestText 'Foreground' $AMBER
+    $ui.ChangeDestButton.Content = 'Choose where to save...'
+    $ui.ChangeDestButton.Style = $window.FindResource('Primary')
+    $ui.ChangeDestButton.Padding = '12,5'; $ui.ChangeDestButton.FontSize = 13
+    $ui.OpenDestButton.Visibility = 'Collapsed'
+    foreach ($row in $app.Rows) { if ($row.Scanned -and $row.CanSelect) { $row.Status = 'Choose where to save to compare'; $row.StatusColor = $GRAY } }
 }
 
 function Set-Destination {
-    param([string] $Path)
+    param([string] $Path, [switch] $ByUser)
     if (-not $Path) { return }
-    try { $Path = [System.IO.Path]::GetFullPath($Path) } catch { Show-Message "That folder cannot be used: $Path" 'iPhone Transfer' 'Warning'; return }
-    if ($app.SourceKind -eq 'Folder' -and $SourceFolder) {
-        $src = [System.IO.Path]::GetFullPath($SourceFolder).TrimEnd('\') + '\'
-        $dst = $Path.TrimEnd('\') + '\'
-        if ($dst.StartsWith($src, [StringComparison]::OrdinalIgnoreCase) -or $src.StartsWith($dst, [StringComparison]::OrdinalIgnoreCase)) {
-            Show-Message 'Please choose a destination outside the folder you are copying from.' 'iPhone Transfer' 'Warning'
-            return
-        }
+    try { $Path = [System.IO.Path]::GetFullPath($Path).TrimEnd('\'); if ($Path.Length -eq 2) { $Path += '\' } }
+    catch { Show-Message "That folder cannot be used: $Path" 'iPhone Transfer' 'Warning'; return }
+    # Picked one month folder (like ...\202609_a) as the destination? Each source folder is
+    # saved as a sub-folder of the destination, so new files would end up in
+    # 202609_a\202609_a. Offer the folder above it instead.
+    $leaf = Split-Path -Leaf $Path
+    $parent = Split-Path -Parent $Path
+    if ($ByUser -and $parent -and ($leaf -match '^\d{6}_{1,2}[a-z]?$' -or $app.RowByName.ContainsKey($leaf))) {
+        $question = ("You chose the folder ""{0}"".`r`n`r`nThe app keeps the same folders as the source, so photos from the source folder {0} would go into ""{1}"".`r`n`r`nSave into the folder above it instead?`r`n`r`n    {2}`r`n`r`n(Files already there - in any of its folders - are recognised either way.)" -f $leaf, (Join-Path $Path $leaf), $parent)
+        if (Confirm-Action $question 'Choose the main folder?') { $Path = $parent }
     }
+    if ($app.SourceKind -eq 'Folder' -and $app.SourcePath -and (Test-Inside $Path $app.SourcePath)) {
+        Show-Message 'Please choose a destination outside the folder you are copying from - otherwise every file would look like its own copy.' 'iPhone Transfer' 'Warning'
+        return
+    }
+    # Must be somewhere we can write: try it now rather than at the first file.
+    $probeDir = $Path
+    while ($probeDir -and -not (Test-Path -LiteralPath $probeDir)) { $probeDir = Split-Path -Parent $probeDir }
+    if (-not $probeDir) { Show-Message "That drive is not available: $Path" 'iPhone Transfer' 'Warning'; return }
+    try {
+        $probe = Join-Path $probeDir ('.iphone-transfer-write-test-' + [guid]::NewGuid().ToString('N'))
+        [System.IO.File]::WriteAllText($probe, 'ok'); [System.IO.File]::Delete($probe)
+    }
+    catch { Show-Message "This app cannot save files in $probeDir.`r`n`r`nPlease choose another folder." 'iPhone Transfer' 'Warning'; return }
+
     if ($app.Dest -ne $Path) { $app.VerifiedOk = @{} }   # checks were made against the old destination
     $app.Dest = $Path
     $ui.DestText.Text = $Path
     $ui.DestText.ToolTip = $Path
+    Set-Color $ui.DestText 'Foreground' '#0F172A'
+    $ui.ChangeDestButton.Content = 'Change...'
+    $ui.ChangeDestButton.Style = $window.FindResource('Small')
+    $ui.ChangeDestButton.ClearValue([System.Windows.Controls.Control]::PaddingProperty)
+    $ui.ChangeDestButton.ClearValue([System.Windows.Controls.Control]::FontSizeProperty)
+    $ui.OpenDestButton.Visibility = 'Visible'
     Update-FreeSpace -Force
     foreach ($row in $app.Rows) { if ($row.Scanned) { $row.Status = 'Comparing...'; $row.StatusColor = $GRAY } }
     if ($sync.Busy) { $sync.NewDest = $Path } else { Send-Command @{ Name = 'SetDestination'; Path = $Path } }
@@ -1050,6 +1107,7 @@ function Update-FreeSpace {
     param([switch] $Force)
     if (-not $Force -and ([DateTime]::UtcNow - $app.LastFreeCheck).TotalSeconds -lt 5) { return }
     $app.LastFreeCheck = [DateTime]::UtcNow
+    if (-not $app.Dest) { $app.Free = [int64] -1; $app.Total = [int64] -1; return }
     $root = $app.Dest
     while ($root -and -not (Test-Path -LiteralPath $root)) { $root = Split-Path -Parent $root }
     if (-not $root) { $root = [System.IO.Path]::GetPathRoot($app.Dest) }
@@ -1179,8 +1237,18 @@ function Update-Row {
     }
     else {
         $row.FilesToCopy = [int64] $Summary.Files; $row.BytesToCopy = [int64] $Summary.Bytes
-        $row.Status = 'Comparing...'; $row.StatusColor = $GRAY
+        if ($app.Dest) { $row.Status = 'Comparing...' } else { $row.Status = 'Choose where to save to compare' }
+        $row.StatusColor = $GRAY
     }
+}
+
+function Get-ElsewhereText {
+    # The iPhone regroups its folders over time, so earlier copies often sit in a differently
+    # named folder on the PC. Say so, so "already there" is not a mystery.
+    param($Row)
+    $s = $app.Summaries[$Row.Name]
+    if ($s -and $s.ElsewhereFiles -gt 0) { return ('{0} found in other folders on this PC. ' -f (Format-Plural $s.ElsewhereFiles 'file' 'files')) }
+    return ''
 }
 
 function Get-Recommendation {
@@ -1198,28 +1266,34 @@ function Get-Recommendation {
     foreach ($row in $ordered) {
         $note = ''
         if ($app.Free -ge 0 -and ($used + $row.BytesToCopy) -gt $budget) {
-            $row.Note = 'Does not fit in the space left on this PC (needs {0}).' -f (Format-Bytes $row.BytesToCopy)
+            $row.Note = (Get-ElsewhereText $row) + ('Does not fit in the space left on this PC (needs {0}).' -f (Format-Bytes $row.BytesToCopy))
             $skipped++
             continue
         }
         $row.Recommended = $true
         [void] $picked.Add($row)
         $used += $row.BytesToCopy
-        if ($row.PresentFiles -gt 0) { $note = 'Recommended - finish this one, its copy was interrupted.' }
+        if ($row.PresentFiles -gt 0) { $note = 'Recommended - part of it is already on this PC, only the rest is copied.' }
         else { $note = 'Recommended.' }
         if ($newest -and $row.Name -eq $newest.Name -and $app.SourceKind -eq 'Device') { $note += ' Newest folder - new photos may still be added to it.' }
-        $row.Note = $note
+        $row.Note = (Get-ElsewhereText $row) + $note
     }
     foreach ($row in $app.Rows) {
         if ($row.Scanned -and $row.CanSelect -and $row.FileCount -gt 0 -and $row.BytesToCopy -le 0) {
             if ($app.VerifiedOk.ContainsKey($row.Name)) { $row.Note = 'Checked. You can free up its space on the iPhone.' }
-            else { $row.Note = 'Already on this PC. Select it to check it and free up the iPhone.' }
+            else { $row.Note = (Get-ElsewhereText $row) + 'Nothing to copy. Select it to check it and free up the iPhone.' }
         }
     }
     return @{ Rows = $picked; Bytes = $used; Skipped = $skipped; Budget = $budget }
 }
 
 function Update-Recommendation {
+    if (-not $app.Dest) {
+        $ui.RecommendTitle.Text = 'Choose where to save the photos.'
+        $ui.RecommendText.Text = 'Press "Choose where to save..." above. The app then compares this source with that folder - every sub-folder in it - and recommends what to copy.'
+        $ui.SelectRecommendedButton.IsEnabled = $false
+        return
+    }
     if (-not $app.ScanDone) {
         $ui.RecommendTitle.Text = 'Reading your folders...'
         $ui.RecommendText.Text = 'A recommendation appears once every folder has been read. You can already tick folders that are done.'
@@ -1266,6 +1340,7 @@ function Update-Selection {
     foreach ($r in $selected) { $files += $r.FileCount; $toCopy += $r.BytesToCopy; $toCopyFiles += $r.FilesToCopy; $total += $r.Bytes }
 
     # free-space bar
+    if ($app.Dest) { $ui.SpaceArea.Visibility = 'Visible' }
     if ($app.Total -gt 0 -and $app.Free -ge 0) {
         $used = [double] ($app.Total - $app.Free)
         $need = [double] [math]::Min([int64] $toCopy, [int64] $app.Free)
@@ -1281,13 +1356,21 @@ function Update-Selection {
         }
         $ui.SpaceText.Text = $text
     }
+    elseif (-not $app.Dest) { $fits = $true; $ui.SpaceText.Text = 'Choose where to save to see the free space there.'; $ui.SpaceArea.Visibility = 'Collapsed' }
     else { $fits = $true; $ui.SpaceText.Text = 'Free space unknown for this location.' }
 
+    $ui.CompareButton.IsEnabled = ($selected.Count -gt 0) -and [bool] $app.Dest -and -not $sync.Busy -and -not $app.CopyRunning
     if ($selected.Count -eq 0) {
         $ui.SelectionText.Text = 'No folders selected yet'
         $ui.SelectionDetail.Text = 'Tick folders in the list, or use the recommendation above.'
         $ui.StartCopyButton.IsEnabled = $false
         $ui.StartCopyButton.Content = 'Copy selected folders'
+        return
+    }
+    if (-not $app.Dest) {
+        $ui.SelectionText.Text = ('{0} selected{1}{2}{3}{4}' -f (Format-Plural $selected.Count 'folder' 'folders'), $DOT, (Format-Plural $files 'file' 'files'), $DOT, (Format-Bytes $total))
+        $ui.SelectionDetail.Text = 'Choose where to save (above) - then the app compares and copies only what is not there yet.'
+        $ui.StartCopyButton.IsEnabled = $false
         return
     }
     $ui.SelectionText.Text = ('{0} selected{1}{2}{3}{4}' -f (Format-Plural $selected.Count 'folder' 'folders'), $DOT, (Format-Plural $files 'file' 'files'), $DOT, (Format-Bytes $total))
@@ -1454,6 +1537,7 @@ function Start-Check {
     param([string[]] $Names, [bool] $Full)
     if (-not $Names -or $Names.Count -eq 0) { return }
     $app.CheckFolders = $Names
+    if ($app.SourceKind -eq 'Device') { $ui.CheckGrid.Columns[1].Header = 'On the iPhone' } else { $ui.CheckGrid.Columns[1].Header = 'In the source folder' }
     $app.CheckRunning = $true
     $app.CheckDone = $null
     $app.CheckRows.Clear()
@@ -1476,7 +1560,7 @@ function Start-Check {
     }
     else {
         $ui.CheckTitle.Text = 'Checking every file'
-        $ui.CheckSub.Text = ('Each file on {0} is compared with its copy on this PC: name, size, and a digital fingerprint of the content.' -f (Get-SourceWord))
+        $ui.CheckSub.Text = ('Each file from {0} is compared with its copy on this PC: name, size, and a digital fingerprint of the content.' -f (Get-SourceWord))
     }
     foreach ($b in 'OpenReportButton', 'FullCheckButton', 'GoDeleteButton') { $ui[$b].IsEnabled = $false }
     $ui.FixButton.Visibility = 'Collapsed'
@@ -1704,16 +1788,29 @@ function Invoke-EngineEvent {
             }
             if ($e.Kind -eq 'Device') { $ui.FolderListLabel.Text = 'Folders on the iPhone' } else { $ui.FolderListLabel.Text = 'Folders' }
             if ($e.Kind -eq 'Device') {
+                $app.SourcePath = ''
                 $ui.AnalyzeTitle.Text = "What's on your iPhone"
-                $ui.AnalyzeSub.Text = 'Every folder is being read. Choose whole folders to copy, so nothing is left behind. All file types are copied, including edits and Live Photo videos.'
+                $ui.AnalyzeSub.Text = 'Every folder is being read and compared with the folder you save to. Files already there - in any of its folders - are skipped. All file types are copied, including edits and Live Photo videos.'
+                $ui.SourceText.Text = $e.Label
+                $ui.UseIPhoneButton.Visibility = 'Collapsed'
             }
             else {
+                $app.SourcePath = $e.Label
                 $ui.AnalyzeTitle.Text = 'What is in ' + (Split-Path -Leaf $e.Label)
-                $ui.AnalyzeSub.Text = $e.Label
+                $ui.AnalyzeSub.Text = 'Every folder is being read and compared with the folder you save to. Files already there - in any of its folders - are skipped.'
+                if ($e.LooseFiles -gt 0) { $ui.AnalyzeSub.Text += (' {0} directly in the chosen folder, not in any of its sub-folders, and left out.' -f (Format-Plural $e.LooseFiles 'file is' 'files are')) }
+                $ui.SourceText.Text = $e.Label
+                $ui.UseIPhoneButton.Visibility = 'Visible'
             }
+            $ui.SourceText.ToolTip = $ui.SourceText.Text
             Show-Page 'Analyze'
             Update-SummaryChips
-            if (-not $app.Dest) { Set-Destination (Get-DefaultDestination) } else { Send-Command @{ Name = 'SetDestination'; Path = $app.Dest } }
+            # The destination is checked again against this source (they must not overlap).
+            $wanted = $app.Dest
+            if (-not $wanted) { $wanted = Get-DefaultDestination }
+            $app.Dest = ''
+            if ($wanted) { Set-Destination $wanted }
+            if (-not $app.Dest) { Show-NoDestination; Send-Command @{ Name = 'SetDestination'; Path = '' } }
             Update-DrivePanel
             $app.Scanning = $true; $app.ScanDone = $false; $app.AutoSelected = $false
             Send-Command @{ Name = 'Scan'; Folders = [string[]] $e.Names }
@@ -1728,12 +1825,16 @@ function Invoke-EngineEvent {
             $app.Scanning = $false; $app.ScanDone = $true
             foreach ($row in $app.Rows) { if (-not $row.Scanned) { $row.Status = 'Not read'; $row.StatusColor = $GRAY; $row.Note = 'Press Read again to read it.' } }
             Update-Recommendation
-            if (-not $app.AutoSelected -and @($app.Rows | Where-Object { $_.Selected }).Count -eq 0) { Select-Recommended }
-            $app.AutoSelected = $true
+            if ($app.Dest -and -not $app.AutoSelected -and @($app.Rows | Where-Object { $_.Selected }).Count -eq 0) { Select-Recommended; $app.AutoSelected = $true }
             Write-UiLog 'scan complete'
         }
         'Session' {
             $app.Session = $e
+            if ($app.ScanDone -and $app.Dest -and -not $app.AutoSelected) {
+                Update-Recommendation
+                if (@($app.Rows | Where-Object { $_.Selected }).Count -eq 0) { Select-Recommended }
+                $app.AutoSelected = $true
+            }
             if ($e.State -eq 'copying' -and @($e.Folders).Count -gt 0) {
                 $ui.ResumeButton.Visibility = 'Visible'
                 $ui.ResumeButton.ToolTip = 'Last copy (' + (@($e.Folders) -join ', ') + ') did not finish. Continue it.'
@@ -1784,6 +1885,18 @@ function Invoke-EngineEvent {
             else { $ui.WaitingBanner.Visibility = 'Collapsed'; $window.TaskbarItemInfo.ProgressState = 'Normal' }
         }
         'CopyDone' { Complete-Copy $e }
+        'CompareDone' {
+            $files = 0; $present = 0; $elsewhere = 0; $missing = 0; $missingBytes = [int64] 0
+            foreach ($f in $e.Folders) { $files += $f.Files; $present += $f.Present; $elsewhere += $f.Elsewhere; $missing += $f.Missing; $missingBytes += $f.MissingBytes }
+            $app.CompareResult = $e
+            $text = "{0} compared with {1}:`r`n`r`n  Already on this PC:  {2}" -f (Format-Plural $files 'file' 'files'), $app.Dest, (Format-Count $present)
+            if ($elsewhere -gt 0) { $text += "`r`n     (of these, {0} in a differently named folder)" -f (Format-Count $elsewhere) }
+            $text += "`r`n  Not on this PC yet:  {0} ({1})" -f (Format-Count $missing), (Format-Bytes $missingBytes)
+            $text += "`r`n`r`nThe report with every file opens now. Press ""Copy selected folders"" to copy only the files that are not there yet."
+            Write-UiLog ("compare: {0} files, {1} present, {2} missing" -f $files, $present, $missing)
+            if ($e.Report) { Open-Path $e.Report }
+            Show-Message $text 'Compare'
+        }
         'VerifyPlan' { }
         'FolderVerified' { Update-CheckRow $e }
         'VerifyDone' { Complete-Check $e }
@@ -1861,9 +1974,32 @@ $ui.UseFolderButton.Add_Click({ Invoke-Safely {
     $path = Select-FolderDialog 'Choose the folder to copy from (for example the DCIM folder of an SD card).' ''
     if ($path) { $script:SourceFolder = $path; $sync.Watch = $false; Start-Analysis -Kind 'Folder' -Path $path }
 } })
+$ui.ChangeSourceButton.Add_Click({ Invoke-Safely {
+    if ($sync.Busy -and -not $app.Scanning) { Show-Message 'Please wait until the current step has finished.'; return }
+    $path = Select-FolderDialog 'Choose the folder to copy FROM. It can hold month folders, or the photos themselves.' $app.SourcePath
+    if (-not $path) { return }
+    if ($app.Dest -and (Test-Inside $path $app.Dest)) { Show-Message 'That folder is the same as, or inside, the folder you save to. Please choose another one.' 'iPhone Transfer' 'Warning'; return }
+    if ($app.Scanning) { $sync.Cancel = $true }
+    $script:SourceFolder = $path; $sync.Watch = $false
+    Start-Analysis -Kind 'Folder' -Path $path
+} })
+$ui.UseIPhoneButton.Add_Click({ Invoke-Safely {
+    if ($sync.Busy -and -not $app.Scanning) { Show-Message 'Please wait until the current step has finished.'; return }
+    if ($app.Scanning) { $sync.Cancel = $true }
+    $script:SourceFolder = ''; $sync.Watch = $true
+    if ($app.Device -and $app.Device.State -eq 'Ready') { Start-Analysis -Kind 'Device' }
+    else { Show-Page 'Connect' }
+} })
+$ui.CompareButton.Add_Click({ Invoke-Safely {
+    $names = [string[]] @($app.Rows | Where-Object { $_.Selected -and $_.CanSelect } | ForEach-Object { $_.Name })
+    if ($names.Count -eq 0 -or -not $app.Dest) { return }
+    $ui.CompareButton.IsEnabled = $false
+    $ui.SelectionDetail.Text = 'Comparing...'
+    Send-Command @{ Name = 'Compare'; Folders = $names }
+} })
 $ui.ChangeDestButton.Add_Click({ Invoke-Safely {
     $path = Select-FolderDialog 'Choose where to save the photos and videos.' $app.Dest
-    if ($path) { Set-Destination $path; Update-DrivePanel }
+    if ($path) { Set-Destination $path -ByUser; Update-DrivePanel }
 } })
 $ui.OpenDestButton.Add_Click({ Invoke-Safely { New-Item -ItemType Directory -Force -Path $app.Dest | Out-Null; Open-Path $app.Dest } })
 $ui.SelectRecommendedButton.Add_Click({ Invoke-Safely { Select-Recommended } })
@@ -2005,6 +2141,15 @@ function Step-AutoPilot {
                 Save-Screenshot '2-analyze'
                 if ($AutoStopAfter -eq 'Analyze') { & $next 'finish'; return }
                 if (@($app.Rows | Where-Object { $_.Selected }).Count -eq 0) { [void] $auto.Log.Add('nothing selected'); & $next 'finish'; return }
+                if ($AutoCompare -and -not $auto.Shots['compared']) { $auto.Shots['compared'] = $true; Invoke-Click $ui.CompareButton; & $next 'compare'; return }
+                Invoke-Click $ui.StartCopyButton
+                & $next 'copy'
+            }
+        }
+        'compare' {
+            if ($app.CompareResult -and -not $sync.Busy -and $elapsed -gt 1) {
+                Save-Screenshot '2-compared'
+                if ($AutoStopAfter -eq 'Analyze') { & $next 'finish'; return }
                 Invoke-Click $ui.StartCopyButton
                 & $next 'copy'
             }
@@ -2061,7 +2206,7 @@ function Step-AutoPilot {
             if ($ScreenshotDir) {
                 $result = @{
                     Stages = @($auto.Log)
-                    Copy = $app.CopyDone; Check = $app.CheckDone; Delete = $app.DeleteDone
+                    Copy = $app.CopyDone; Check = $app.CheckDone; Delete = $app.DeleteDone; Compare = $app.CompareResult
                     Rows = @($app.Rows | ForEach-Object { @{ Name = $_.Name; Selected = $_.Selected; Status = $_.Status; Note = $_.Note; Recommended = $_.Recommended } })
                     CheckRows = @($app.CheckRows | ForEach-Object { @{ Name = $_.Name; Phone = $_.Phone; Laptop = $_.Laptop; Status = $_.Status } })
                     DeleteRows = @($app.DeleteRows | ForEach-Object { @{ Name = $_.Name; Status = $_.Status } })

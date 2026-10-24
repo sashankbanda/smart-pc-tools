@@ -37,11 +37,20 @@ Not an iPhone? *Use a folder on this PC instead* works with an SD card, a camera
 
 ### 2. Choose folders
 
+At the top you set the two places the app works with:
+
+- **Copy from** - the iPhone, or *Choose a folder...* for any folder on the PC (an SD card, a camera, a backup). The folder may hold month folders, or the photos themselves.
+- **Save to** - *Choose where to save...* picks your photo folder, for example `C:\06_IPHONE_PHOTOS`. Nothing is copied until you have chosen it; it is remembered for next time. Pick the main folder, not one of its month folders - the app keeps the source's folders inside it (and offers to fix it if you pick a month folder).
+
 The iPhone keeps photos in one folder per month (`202608_a` is August 2026; a busy month gets `_b`, `_c`, ...). The app reads every folder and shows, per folder:
 
 - the dates the photos were taken
-- how many photos, videos and other files are in it, and its size
+- how many photos, videos and other files are in it, its size, and the file types (hover over a folder)
 - whether it is already on this PC: *Not on this PC yet*, *Partly (1,200 of 2,159)*, or *On this PC*
+
+**How "already on this PC" is decided:** a file counts as already there when a file with the **same name and the same size** is anywhere in the *Save to* folder - in the folder of the same name, or in any other folder. That matters because the iPhone regroups its month folders over time: a photo copied last month into `202605_b` may now be listed under `202605_a`. Such files are skipped, not copied twice. Folders starting with a dot (like `.dtrash`) do not count. The name and size are only a first look - the check (step 4) proves the content before anything can be deleted.
+
+**Compare only** lists every file of the selected folders - where it was found on the PC, or that it is not there yet - in a report, and copies nothing.
 
 Above the list it shows where the files will be saved, **how much free space the PC has**, and how much the current selection needs - with a bar that turns red when it would not fit. Other drives and their free space are one click away.
 
@@ -86,7 +95,7 @@ Only folders that passed the check with **every single file matching** are offer
 | --- | --- |
 | Your photos and videos | The folder you chose (default `Pictures\iPhone`), one sub-folder per phone folder |
 | Fingerprints of every copied file | `<that folder>\.iphone-transfer\manifest.csv` (hidden folder) |
-| Check reports | `<that folder>\.iphone-transfer\check-<date>.html` and `.csv` |
+| Check and compare reports | `<that folder>\.iphone-transfer\check-<date>.html`, `compare-<date>.html` and `.csv` |
 | List of files deleted from the phone | `<that folder>\.iphone-transfer\deleted-from-source.csv` |
 | Activity log | `%LOCALAPPDATA%\iPhoneTransfer\logs` - *Open the activity log* in the sidebar |
 | Last destination and measured speed | `%APPDATA%\iPhoneTransfer\settings.json` |
