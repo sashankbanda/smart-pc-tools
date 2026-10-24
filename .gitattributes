@@ -1,0 +1,8 @@
+# Windows scripts need CRLF; the bash script must keep LF or bash cannot run it.
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+*.cs   text eol=crlf
+*.sh   text eol=lf
+*.md   text
+*.ico  binary
+*.png  binary
