@@ -9,6 +9,11 @@ It comes in two forms:
 - **The iPhone Transfer app** - a simple window that walks you through it. Made for everyone; no typing.
 - **The `Copy-IPhoneMedia.ps1` script** - the same verified copy from the command line, for repeat or scheduled runs.
 
+## Watch how it works (2 minutes)
+
+[![iPhone Transfer - how to use it](docs/tutorial-preview.png)](docs/iPhone-Transfer-tutorial.mp4)
+
+**[Watch the video](docs/iPhone-Transfer-tutorial.mp4)** - every step, on the real app: connect, choose folders, copy, check, and free up the iPhone. (On GitHub, open the file and press *View raw* to play or download it.)
 ## Before you start
 
 **1. Install Apple Devices** from the Microsoft Store: **➡️ [Apple Devices](https://apps.microsoft.com/detail/9np83lwlpz9k?hl=en-US&gl=BG)**
@@ -335,3 +340,11 @@ The manifest is handy later: `Get-FileHash` on any copied file should match its 
 | Files arrive as `.JPG` when you expected `.HEIC` | Phone is converting on transfer. Set *Transfer to Mac or PC* to **Keep Originals**. |
 | Transfer is slow | Use a USB 3 port and Apple's own cable; cheap cables often negotiate USB 2 speeds. `-BufferMB 8` can help a little. |
 | `Note: could not compile the native helper` | Something blocks the on-the-fly C# compile. The script continues with `-Engine Shell` (slower, progress per file only at completion). |
+
+## Re-recording the tutorial video
+
+`tools\make-tutorial.ps1` rebuilds `docs\iPhone-Transfer-tutorial.mp4` after the app changes. It creates a demo iPhone (a folder of made-up photos - no real phone is touched), runs the app in tutorial mode so it clicks through every step by itself and captures each screen, then draws the explanations, spotlights and pointer and encodes an H.264 MP4 with Windows' own Media Foundation encoder. Nothing to install; it takes about 20 minutes and needs about 4 GB of free space while it runs.
+
+```powershell
+powershell -STA -ExecutionPolicy Bypass -File tools\make-tutorial.ps1
+```
