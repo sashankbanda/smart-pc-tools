@@ -23,7 +23,7 @@ Windows cannot see an iPhone on its own - plug one into a fresh Windows install 
 **2. Get this project.** On GitHub press **Code > Download ZIP** and unzip it anywhere (for example into *Documents*), or:
 
 ```bash
-git clone https://github.com/sashankbanda/iphone-file-transfer.git
+git clone https://github.com/sashankbanda/smart-transfer.git
 ```
 
 Windows 10 or 11 is all you need otherwise - PowerShell is built in.
