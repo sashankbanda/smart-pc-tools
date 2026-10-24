@@ -981,6 +981,69 @@ function Copy-OneFile {
     }
 }
 
+function Read-SourceTrusted {
+    # Reads a source file for the check. Returns @{ Sha } only when the read can be trusted:
+    # complete, the right kind of file, and not a repeat of the file read just before it
+    # (a phone in a bad state hands over stale data). Otherwise reconnects and tries again;
+    # gives up with @{ Sha = $null; Error } - which the check reports as "could not be read
+    # reliably", never as "different", so a good copy is never written off because of it.
+    param($Entry)
+    $key = Get-EntryKey $Entry
+    $lastError = ''
+    $repeatSha = $null
+    for ($round = 1; $round -le 2; $round++) {
+        for ($try = 1; $try -le 3; $try++) {
+            Assert-NotCancelled
+            $problem = ''
+            try {
+                $r = Read-SourceStream -Entry $Entry
+                $expected = $r.Expected
+                if ($expected -le 0) { $expected = $Entry.Size }
+                if ($r.Bytes -le 0 -and $expected -gt 0) { $problem = 'received 0 bytes' }
+                elseif ($expected -gt 0 -and $r.Bytes -ne $expected) { $problem = "received $($r.Bytes) bytes, expected $expected" }
+                elseif (-not (Test-Signature $r.Head $Entry.Ext)) {
+                    # An unusual file is accepted only if a fresh connection gives exactly the same bytes.
+                    if ($repeatSha -and $repeatSha -eq $r.Sha) { $problem = '' }
+                    else { $repeatSha = $r.Sha; $problem = 'the data does not look like this kind of file' }
+                }
+                elseif ($script:LastCheckRead -and $script:LastCheckRead.Key -ne $key -and $script:LastCheckRead.Sha -eq $r.Sha) {
+                    # Identical to the previous file: genuine (two equal edit files) only if a
+                    # fresh connection gives exactly the same bytes again.
+                    if ($repeatSha -and $repeatSha -eq $r.Sha) { $problem = '' }
+                    else { $repeatSha = $r.Sha; $problem = 'the data repeats the previous file' }
+                }
+                if (-not $problem) {
+                    $script:LastCheckRead = @{ Key = $key; Sha = $r.Sha }
+                    $script:UnreliableInARow = 0
+                    return @{ Sha = $r.Sha }
+                }
+            }
+            catch {
+                if (Test-Cancelled $_) { throw }
+                $problem = Get-ErrorText $_
+                if ($script:Source.Kind -eq 'Device' -and -not (Test-SourceAvailable)) {
+                    if (-not (Wait-ForDevice)) { throw (New-Object System.OperationCanceledException) }
+                }
+            }
+            $lastError = $problem
+            Write-Log "check: unreliable read of $($Entry.Rel)\$($Entry.Name) (try $try): $problem"
+            $P.CurrentBytes = [int64] 0
+            if ($script:Source.Kind -eq 'Device') { Reset-DeviceConnection }
+            try { $Entry.Item = Get-SourceFile $Entry } catch { }
+        }
+        # Several files in a row that cannot be read reliably: the phone itself is stuck.
+        $script:UnreliableInARow = [int] $script:UnreliableInARow + 1
+        if ($round -eq 1 -and $script:UnreliableInARow -ge 3 -and $script:Source.Kind -eq 'Device') {
+            Wait-ForReplug
+            $script:UnreliableInARow = 0
+            try { $Entry.Item = Get-SourceFile $Entry } catch { }
+            continue
+        }
+        break
+    }
+    return @{ Sha = $null; Error = $lastError }
+}
+
 function Wait-ForReplug {
     # The phone is connected but has stopped handing over files. Usually unplugging it and
     # plugging it back in (and unlocking it) fixes that. Wait for exactly that, or for the
@@ -1172,6 +1235,7 @@ function Invoke-Verify {
     foreach ($n in $Names) { [void] $script:Verified.Remove($n) }
     Import-Manifest
     Update-DestIndex
+    $script:LastCheckRead = $null; $script:UnreliableInARow = 0
     Reset-Progress -Phase 'Verify' -Step 'Reading the list of files from the iPhone again'
     $P.FilesTotal = [int64] $Names.Count
 
@@ -1254,21 +1318,14 @@ function Invoke-Verify {
                 $expected = $null; $how = ''
                 if ($step.ReadPhone) {
                     Set-Current -Name $entry.Name -Folder $name -Size $entry.Size
-                    $phone = $null
-                    for ($try = 1; $try -le 3 -and $null -eq $phone; $try++) {
-                        try { $phone = Read-SourceStream -Entry $entry }
-                        catch {
-                            if (Test-Cancelled $_) { throw }
-                            Write-Log "check: reading $($entry.Name) from the source failed: $(Get-ErrorText $_)"
-                            if ($script:Source.Kind -eq 'Device' -and -not (Test-SourceAvailable)) {
-                                if (-not (Wait-ForDevice)) { throw (New-Object System.OperationCanceledException) }
-                            }
-                            try { $entry.Item = Get-SourceFile $entry } catch { }
-                            $P.CurrentBytes = [int64] 0
-                        }
-                    }
+                    $phone = Read-SourceTrusted -Entry $entry
                     $P.BytesDone = [int64] $P.BytesDone + $entry.Size; $P.CurrentBytes = [int64] 0
-                    if ($null -eq $phone) { $record.Status = 'Unreadable'; $record.Detail = 'could not read it from the iPhone to compare' }
+                    if ($null -eq $phone.Sha) {
+                        $lastReadProblem = $phone.Error
+                        $phone = $null
+                        $record.Status = 'Unreadable'
+                        $record.Detail = 'the iPhone did not give a reliable read (' + $lastReadProblem + ') - unplug and replug it, then check again'
+                    }
                     else {
                         $expected = $phone.Sha
                         if ($script:Source.Kind -eq 'Device') { $how = 'read from the iPhone again' } else { $how = 'read from the source again' }

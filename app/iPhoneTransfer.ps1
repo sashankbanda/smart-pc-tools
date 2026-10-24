@@ -358,6 +358,9 @@ function Save-Settings {
                          Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
             </StackPanel>
           </Border>
+          <Border x:Name="UpdateNotice" Visibility="Collapsed" Background="#78350F" CornerRadius="10" Padding="12,10" Margin="0,0,0,12">
+            <TextBlock Text="A newer version of iPhone Transfer was installed. Close this window and open the app again to use it." Foreground="#FEF3C7" FontSize="12" TextWrapping="Wrap"/>
+          </Border>
           <Button x:Name="ShortcutButton" Content="Add a desktop shortcut" Style="{StaticResource SideLink}" HorizontalAlignment="Left" Margin="0,0,0,8"/>
           <Button x:Name="OpenLogButton" Content="Open the activity log" Style="{StaticResource SideLink}" HorizontalAlignment="Left"/>
         </StackPanel>
@@ -1912,6 +1915,7 @@ function Invoke-EngineEvent {
                 $ui.TryAgainButton.Visibility = 'Visible'
                 $ui.WaitingBanner.Visibility = 'Visible'
                 $ui.CopyRate.Text = 'Waiting for the iPhone...'
+                if ($app.Page -eq 'Check') { $ui.CheckStep.Text = 'The iPhone has stopped sending files - unplug it, plug it back in and unlock it. The check then continues.' }
                 $window.TaskbarItemInfo.ProgressState = 'Paused'
                 [System.Media.SystemSounds]::Exclamation.Play()
             }
@@ -2380,6 +2384,11 @@ function Step-AutoPilot {
 # the heartbeat: drain engine events, refresh live numbers
 # ---------------------------------------------------------------------------
 
+# Remember how the app's own files looked at start, to notice an update installed meanwhile.
+$AppFiles = @('iPhoneTransfer.ps1', 'Engine.ps1', 'Native.cs') | ForEach-Object { Join-Path $PSScriptRoot $_ }
+$AppStamp = (($AppFiles | ForEach-Object { if (Test-Path -LiteralPath $_) { (Get-Item -LiteralPath $_).LastWriteTimeUtc.Ticks } }) -join ',')
+$app.LastUpdateCheck = [DateTime]::UtcNow
+
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(200)
 $timer.Add_Tick({
@@ -2396,6 +2405,11 @@ $timer.Add_Tick({
             'Copy'    { Update-CopyLive }
             'Check'   { Update-CheckLive }
             'Delete'  { Update-DeleteLive; Update-DeleteSelection }
+        }
+        if (([DateTime]::UtcNow - $app.LastUpdateCheck).TotalSeconds -ge 30) {
+            $app.LastUpdateCheck = [DateTime]::UtcNow
+            $now = (($AppFiles | ForEach-Object { if (Test-Path -LiteralPath $_) { (Get-Item -LiteralPath $_).LastWriteTimeUtc.Ticks } }) -join ',')
+            if ($now -ne $AppStamp) { $ui.UpdateNotice.Visibility = 'Visible' }
         }
         if ($Tutorial) { Step-Tutorial }
         elseif ($AutoPilot) { Step-AutoPilot }
