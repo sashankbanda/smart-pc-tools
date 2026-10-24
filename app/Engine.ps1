@@ -31,7 +31,7 @@ $script:Source         = $null    # @{ Kind = 'Device' | 'Folder'; Device; Stora
 $script:Folders        = @{}      # folder name -> @{ Files = list of entries; Error }
 $script:Verified       = @{}      # folder name -> @{ Ok; Files = key -> record }
 $script:Manifest       = @{}      # "folder|name" -> @{ Dest; Sha; Size }
-$script:BadCopies      = @{}      # PC paths the check found damaged: never counted as a copy again
+$script:BadCopies      = @{}      # "source key>pc path" pairs the check found not to match
 $script:Dest           = ''
 $script:Log            = $null
 $script:ManifestWriter = $null
@@ -416,11 +416,17 @@ function Get-FolderSummary {
 
     if ($script:Dest) {
         if ($null -eq $Cache) { $Cache = @{} }
-        $present = 0; $presentBytes = [int64] 0; $fingerprinted = 0
+        $present = 0; $presentBytes = [int64] 0; $fingerprinted = 0; $elsewhere = 0
         foreach ($e in $record.Files) {
             $copy = Find-Copy -Entry $e -Cache $Cache
-            if ($copy) { $present++; $presentBytes += $e.Size; if ($copy.Sha) { $fingerprinted++ } }
+            if ($copy) {
+                $present++; $presentBytes += $e.Size
+                if ($copy.Sha) { $fingerprinted++ }
+                $homeDir = (Join-Path $script:Dest $e.Rel).TrimEnd('\')
+                if (-not (Split-Path -Parent $copy.Path).Equals($homeDir, [StringComparison]::OrdinalIgnoreCase)) { $elsewhere++ }
+            }
         }
+        $summary.ElsewhereFiles = $elsewhere
         $summary.PresentFiles = $present
         $summary.PresentBytes = $presentBytes
         $summary.Fingerprinted = $fingerprinted
@@ -495,11 +501,65 @@ function Get-DirIndex {
     return $index
 }
 
-function Find-Copy {
-    # Where is this phone file on the PC, if anywhere? Same name and same size counts; the
-    # SHA-256 from the manifest (when there is one) lets the check prove the content too.
+function Get-EntryKey { param($Entry) return ($Entry.Rel + '|' + $Entry.Name).ToLowerInvariant() }
+
+# A PC file the check found not to match a particular source file. Per source file, because
+# the same PC file can be the right copy of another source file with the same name and size.
+function Test-BadCopy { param([string] $Key, [string] $Path) return $script:BadCopies.ContainsKey($Key + '>' + $Path.ToLowerInvariant()) }
+function Set-BadCopy  { param([string] $Key, [string] $Path) $script:BadCopies[$Key + '>' + $Path.ToLowerInvariant()] = $true }
+
+function Update-DestIndex {
+    # Every file anywhere in the destination, by name. The iPhone regroups its month folders
+    # over time (a photo once in 202605_b can later be listed under 202605_a), so a copy made
+    # earlier may sit in a differently named folder. Folders starting with "." (this app's own
+    # .iphone-transfer, other apps' trash such as .dtrash) and "$" (system) are left out.
+    $script:DestIndex = @{}
+    if (-not $script:Dest -or -not [System.IO.Directory]::Exists($script:Dest)) { return }
+    $count = 0
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($script:Dest)
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        try { $info = New-Object System.IO.DirectoryInfo($dir); $subs = $info.GetDirectories(); $files = $info.GetFiles() }
+        catch { continue }
+        foreach ($s in $subs) {
+            if ($s.Name.StartsWith('.') -or $s.Name.StartsWith('$') -or $s.Name -eq 'System Volume Information') { continue }
+            if ($s.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+            $stack.Push($s.FullName)
+        }
+        foreach ($f in $files) { Add-DestIndex -Path $f.FullName -Size $f.Length -Mod $f.LastWriteTimeUtc; $count++ }
+    }
+    Write-Log "destination holds $count files"
+}
+
+function Add-DestIndex {
+    param([string] $Path, [int64] $Size, $Mod)
+    if ($null -eq $script:DestIndex) { $script:DestIndex = @{} }
+    $key = [System.IO.Path]::GetFileName($Path).ToLowerInvariant()
+    $list = $script:DestIndex[$key]
+    if ($null -eq $list) { $list = New-Object System.Collections.ArrayList; $script:DestIndex[$key] = $list }
+    [void] $list.Add(@{ Path = $Path; Size = $Size; Mod = $Mod })
+}
+
+function Find-Copies {
+    # Every file on the PC that may be this source file - same name and same size - best first:
+    #   1. where the manifest says it was copied to
+    #   2. the same folder name as on the source (also name_1, name_2 ... kept alongside)
+    #   3. anywhere else in the destination, same date first
+    # The SHA-256 from the manifest (when there is one for this file) travels along, so the
+    # check can prove the content; without it the check reads the source file again.
     param($Entry, $Cache)
-    $key = ($Entry.Rel + '|' + $Entry.Name).ToLowerInvariant()
+    $key = Get-EntryKey $Entry
+    $found = New-Object System.Collections.ArrayList
+    $seen = @{}
+    $add = {
+        param([string] $Path, [int64] $Size)
+        $l = $Path.ToLowerInvariant()
+        if ($seen.ContainsKey($l) -or (Test-BadCopy $key $Path)) { return }
+        $seen[$l] = $true
+        [void] $found.Add(@{ Path = $Path; Sha = $sha; Size = $Size })
+    }
+
     $m = $script:Manifest[$key]
     $sha = $null
     if ($m -and ($Entry.Size -le 0 -or $m.Size -eq $Entry.Size)) {
@@ -507,7 +567,7 @@ function Find-Copy {
         if ($m.Dest) {
             $index = Get-DirIndex -Directory (Split-Path -Parent $m.Dest) -Cache $Cache
             $length = $index[(Split-Path -Leaf $m.Dest).ToLowerInvariant()]
-            if ($null -ne $length -and $length -eq $m.Size -and -not $script:BadCopies.ContainsKey($m.Dest.ToLowerInvariant())) { return @{ Path = $m.Dest; Sha = $sha; Size = $length } }
+            if ($null -ne $length -and $length -eq $m.Size) { & $add $m.Dest $length }
         }
     }
 
@@ -515,16 +575,32 @@ function Find-Copy {
     $index = Get-DirIndex -Directory $directory -Cache $Cache
     $safe = Get-SafeName $Entry.Name
     $lower = $safe.ToLowerInvariant()
-    if ($index.ContainsKey($lower) -and $index[$lower] -eq $Entry.Size -and -not $script:BadCopies.ContainsKey((Join-Path $directory $safe).ToLowerInvariant())) { return @{ Path = (Join-Path $directory $safe); Sha = $sha; Size = $Entry.Size } }
-
+    if ($index.ContainsKey($lower) -and $index[$lower] -eq $Entry.Size) { & $add (Join-Path $directory $safe) $Entry.Size }
     $base = [System.IO.Path]::GetFileNameWithoutExtension($safe)
     $extension = [System.IO.Path]::GetExtension($safe)
     for ($n = 1; $n -lt 1000; $n++) {
         $candidate = '{0}_{1}{2}' -f $base, $n, $extension
         $l = $candidate.ToLowerInvariant()
         if (-not $index.ContainsKey($l)) { break }
-        if ($index[$l] -eq $Entry.Size -and -not $script:BadCopies.ContainsKey((Join-Path $directory $candidate).ToLowerInvariant())) { return @{ Path = (Join-Path $directory $candidate); Sha = $sha; Size = $Entry.Size } }
+        if ($index[$l] -eq $Entry.Size) { & $add (Join-Path $directory $candidate) $Entry.Size }
     }
+
+    $elsewhere = $null
+    if ($script:DestIndex) { $elsewhere = $script:DestIndex[$lower] }
+    if ($elsewhere) {
+        $same = @($elsewhere | Where-Object { $_.Size -eq $Entry.Size })
+        if ($Entry.Mod) {
+            $same = @($same | Sort-Object { if ($_.Mod -and [math]::Abs(($_.Mod - $Entry.Mod).TotalSeconds) -le 2) { 0 } else { 1 } })
+        }
+        foreach ($c in $same) { if ([System.IO.File]::Exists($c.Path)) { & $add $c.Path $c.Size } }
+    }
+    return , $found
+}
+
+function Find-Copy {
+    param($Entry, $Cache)
+    $all = Find-Copies -Entry $Entry -Cache $Cache
+    if ($all.Count -gt 0) { return $all[0] }
     return $null
 }
 
@@ -545,10 +621,16 @@ function Set-Destination {
     param([string] $Path)
     $script:Dest = $Path
     $script:Verified = @{}   # checks were against the old destination
+    if (-not $Path) {
+        $script:Manifest = @{}; $script:DestIndex = @{}
+        Send-Event 'Session' @{ State = '' }
+        return
+    }
     if (Test-Overlap) {
         Send-Event 'Error' @{ Command = 'SetDestination'; Message = 'The destination is the same as, or inside, the folder being copied from. Please choose a destination somewhere else.' }
     }
     Import-Manifest
+    Update-DestIndex
     Write-Log "destination: $Path ($($script:Manifest.Count) fingerprints on record)"
     $cache = @{}
     foreach ($name in @($script:Folders.Keys)) { Send-Event 'FolderStatus' (Get-FolderSummary -Name $name -Cache $cache) }
@@ -786,6 +868,7 @@ function Copy-OneFile {
             $fingerprint = $result.Sha
             if ($result.FromExplorer) { $fingerprint = '' }
             Write-ManifestRow -Status $status -Entry $entry -Size $result.Bytes -FinalPath $final -Sha $fingerprint -Seconds $sw.Elapsed.TotalSeconds -Attempts $attempt -ErrorText ''
+            Add-DestIndex -Path $final -Size $result.Bytes -Mod $entry.Mod
             if ($fingerprint) { $script:Manifest[($entry.Rel + '|' + $entry.Name).ToLowerInvariant()] = @{ Dest = $final; Sha = $fingerprint; Size = $result.Bytes } }
             else { [void] $script:Manifest.Remove(($entry.Rel + '|' + $entry.Name).ToLowerInvariant()) }
             return @{ Ok = $true; Status = $status; Path = $final; Bytes = $result.Bytes; Sha = $result.Sha; Attempts = $attempt }
@@ -836,6 +919,7 @@ function Invoke-Copy {
     if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue }
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
     Import-Manifest
+    Update-DestIndex
 
     # Plan: every file in the chosen folders that is not on the PC yet.
     $jobs = New-Object System.Collections.ArrayList
@@ -951,6 +1035,7 @@ function Invoke-Verify {
     # must never leave an older "OK" behind for Delete to act on.
     foreach ($n in $Names) { [void] $script:Verified.Remove($n) }
     Import-Manifest
+    Update-DestIndex
     Reset-Progress -Phase 'Verify' -Step 'Reading the list of files from the iPhone again'
     $P.FilesTotal = [int64] $Names.Count
 
@@ -976,7 +1061,9 @@ function Invoke-Verify {
         $plan = New-Object System.Collections.ArrayList
         if ($null -ne $list) {
             foreach ($entry in $list) {
-                $copy = Find-Copy -Entry $entry -Cache $cache
+                $copies = Find-Copies -Entry $entry -Cache $cache
+                $copy = $null
+                if ($copies.Count -gt 0) { $copy = $copies[0] }
                 $readPhone = $false
                 if ($copy) {
                     $readPhone = $Full -or (-not $copy.Sha) -or (-not $entry.Mod)
@@ -991,7 +1078,7 @@ function Invoke-Verify {
                     if ($readPhone) { $bytes += $entry.Size }
                 }
                 $files++
-                [void] $plan.Add(@{ Entry = $entry; Copy = $copy; ReadPhone = $readPhone })
+                [void] $plan.Add(@{ Entry = $entry; Copy = $copy; Copies = $copies; ReadPhone = $readPhone })
             }
         }
         $plans[$name] = $plan
@@ -1019,44 +1106,68 @@ function Invoke-Verify {
                 $record.Status = 'Missing'; $record.Detail = 'not on the PC'
             }
             else {
+                $key = Get-EntryKey $entry
                 $record.Dest = $copy.Path; $record.DestSize = $copy.Size
                 $pcFiles++; $pcBytes += $copy.Size
-                try {
-                    Set-Current -Name $entry.Name -Folder $name -Size $copy.Size
-                    $pcHash = Get-FileSha256 $copy.Path
-                    $P.BytesDone = [int64] $P.BytesDone + $copy.Size; $P.CurrentBytes = [int64] 0
-                    $record.Sha = $pcHash
-                    if ($copy.Sha -and $pcHash -ne $copy.Sha) {
-                        $record.Status = 'Different'; $record.Detail = 'the copy on the PC changed since it was made'
-                        $script:BadCopies[$copy.Path.ToLowerInvariant()] = $true
-                    }
-                    elseif ($step.ReadPhone) {
-                        Set-Current -Name $entry.Name -Folder $name -Size $entry.Size
-                        $phone = $null
-                        for ($try = 1; $try -le 3 -and $null -eq $phone; $try++) {
-                            try { $phone = Read-SourceStream -Entry $entry }
-                            catch {
-                                if (Test-Cancelled $_) { throw }
-                                Write-Log "check: reading $($entry.Name) from the source failed: $(Get-ErrorText $_)"
-                                if ($script:Source.Kind -eq 'Device' -and -not (Test-SourceAvailable)) {
-                                    if (-not (Wait-ForDevice)) { throw (New-Object System.OperationCanceledException) }
-                                }
-                                try { $entry.Item = Get-SourceFile $entry } catch { }
-                                $P.CurrentBytes = [int64] 0
+
+                # What the copy must equal: the fingerprint taken when it was copied - or, when
+                # there is none, the dates disagree, or a full check was asked for, the source
+                # file read again right now.
+                $expected = $null; $how = ''
+                if ($step.ReadPhone) {
+                    Set-Current -Name $entry.Name -Folder $name -Size $entry.Size
+                    $phone = $null
+                    for ($try = 1; $try -le 3 -and $null -eq $phone; $try++) {
+                        try { $phone = Read-SourceStream -Entry $entry }
+                        catch {
+                            if (Test-Cancelled $_) { throw }
+                            Write-Log "check: reading $($entry.Name) from the source failed: $(Get-ErrorText $_)"
+                            if ($script:Source.Kind -eq 'Device' -and -not (Test-SourceAvailable)) {
+                                if (-not (Wait-ForDevice)) { throw (New-Object System.OperationCanceledException) }
                             }
+                            try { $entry.Item = Get-SourceFile $entry } catch { }
+                            $P.CurrentBytes = [int64] 0
                         }
-                        $P.BytesDone = [int64] $P.BytesDone + $entry.Size; $P.CurrentBytes = [int64] 0
-                        if ($null -eq $phone) { $record.Status = 'Unreadable'; $record.Detail = 'could not read it from the iPhone to compare' }
-                        elseif ($phone.Sha -ne $pcHash) { $record.Status = 'Different'; $record.Detail = 'the copy differs from the file on the iPhone'; $script:BadCopies[$copy.Path.ToLowerInvariant()] = $true }
-                        elseif ($script:Source.Kind -eq 'Device') { $record.Method = 'read from the iPhone again' }
-                        else { $record.Method = 'read from the source again' }
                     }
-                    else { $record.Method = 'fingerprint from the copy' }
+                    $P.BytesDone = [int64] $P.BytesDone + $entry.Size; $P.CurrentBytes = [int64] 0
+                    if ($null -eq $phone) { $record.Status = 'Unreadable'; $record.Detail = 'could not read it from the iPhone to compare' }
+                    else {
+                        $expected = $phone.Sha
+                        if ($script:Source.Kind -eq 'Device') { $how = 'read from the iPhone again' } else { $how = 'read from the source again' }
+                    }
                 }
-                catch {
-                    if (Test-Cancelled $_) { throw }
-                    $record.Status = 'Unreadable'; $record.Detail = 'could not read the copy on the PC: ' + (Get-ErrorText $_)
-                    $script:BadCopies[$copy.Path.ToLowerInvariant()] = $true
+                else { $expected = $copy.Sha; $how = 'fingerprint from the copy' }
+
+                if ($expected) {
+                    # Try each file on the PC with this name and size until one matches.
+                    $matched = $null; $first = $true; $readable = $false
+                    foreach ($candidate in $step.Copies) {
+                        Set-Current -Name $entry.Name -Folder $name -Size $candidate.Size
+                        try { $hash = Get-FileSha256 $candidate.Path; $readable = $true }
+                        catch {
+                            if (Test-Cancelled $_) { throw }
+                            Write-Log "check: could not read $($candidate.Path): $(Get-ErrorText $_)"
+                            Set-BadCopy $key $candidate.Path
+                            continue
+                        }
+                        finally {
+                            if ($first) { $P.BytesDone = [int64] $P.BytesDone + $candidate.Size; $first = $false }
+                            $P.CurrentBytes = [int64] 0
+                        }
+                        if ($hash -eq $expected) { $matched = $candidate; break }
+                        Set-BadCopy $key $candidate.Path
+                    }
+                    if ($matched) {
+                        $record.Dest = $matched.Path; $record.DestSize = $matched.Size; $record.Sha = $hash; $record.Method = $how
+                    }
+                    elseif (-not $readable) {
+                        $record.Status = 'Unreadable'; $record.Detail = 'could not read the copy on the PC'
+                    }
+                    else {
+                        $record.Status = 'Different'
+                        if ($step.ReadPhone) { $record.Detail = 'a file with this name and size is on the PC, but its content is different' }
+                        else { $record.Detail = 'the copy on the PC changed since it was made' }
+                    }
                 }
             }
 
@@ -1155,6 +1266,87 @@ function Save-CheckReport {
 }
 
 # ---------------------------------------------------------------------------
+# compare command: a quick look, nothing copied, nothing read in full
+# ---------------------------------------------------------------------------
+
+function Invoke-Compare {
+    # For every file in the chosen folders: is a file with the same name and size anywhere in
+    # the destination? Uses the lists already read; the content is proven only by the check.
+    param([string[]] $Names)
+    if (-not $script:Dest) { throw 'Choose where to save first.' }
+    Assert-NoOverlap
+    Import-Manifest
+    Update-DestIndex
+    $cache = @{}
+    $rows = New-Object System.Collections.ArrayList
+    $folders = New-Object System.Collections.ArrayList
+    foreach ($name in $Names) {
+        $record = $script:Folders[$name]
+        if ($null -eq $record) { continue }
+        $f = @{ Name = $name; Files = 0; Bytes = [int64] 0; Present = 0; Elsewhere = 0; Missing = 0; MissingBytes = [int64] 0; NameClash = 0 }
+        foreach ($e in ($record.Files | Sort-Object { $_.Name })) {
+            $f.Files++; $f.Bytes += $e.Size
+            $copy = Find-Copy -Entry $e -Cache $cache
+            $where = ''; $status = ''
+            if ($copy) {
+                $f.Present++
+                $where = $copy.Path
+                $homeDir = (Join-Path $script:Dest $e.Rel).TrimEnd('\')
+                if ((Split-Path -Parent $copy.Path).Equals($homeDir, [StringComparison]::OrdinalIgnoreCase)) { $status = 'on the PC' }
+                else { $status = 'on the PC, in another folder'; $f.Elsewhere++ }
+            }
+            else {
+                $f.Missing++; $f.MissingBytes += $e.Size
+                $status = 'not on the PC'
+                $same = $null
+                if ($script:DestIndex) { $same = $script:DestIndex[(Get-SafeName $e.Name).ToLowerInvariant()] }
+                if ($same) { $status = 'not on the PC (a different file with this name is there)'; $f.NameClash++; $where = $same[0].Path }
+            }
+            [void] $rows.Add(@{ Folder = $name; Rel = $e.Rel; Name = $e.Name; Size = $e.Size; Date = $(if ($e.Mod) { $e.Mod.ToLocalTime().ToString('yyyy-MM-dd HH:mm') } else { '' }); Status = $status; Where = $where })
+        }
+        [void] $folders.Add($f)
+    }
+
+    $report = ''
+    try {
+        $meta = Get-MetaDirectory
+        New-Item -ItemType Directory -Force -Path $meta | Out-Null
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $csv = New-Object System.Text.StringBuilder
+        [void] $csv.AppendLine('folder,name,size_bytes,date,result,found_at')
+        foreach ($r in $rows) { [void] $csv.AppendLine((@($r.Rel, $r.Name, $r.Size, $r.Date, $r.Status, $r.Where) | ForEach-Object { ConvertTo-CsvField $_ }) -join ',') }
+        [System.IO.File]::WriteAllText((Join-Path $meta "compare-$stamp.csv"), $csv.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+
+        $h = New-Object System.Text.StringBuilder
+        [void] $h.Append('<!doctype html><html><head><meta charset="utf-8"><title>iPhone Transfer - compare</title><style>')
+        [void] $h.Append('body{font-family:Segoe UI,Arial,sans-serif;margin:32px;color:#0f172a;background:#f8fafc}h1{font-size:24px;margin:0 0 4px}.sub{color:#64748b;margin-bottom:24px}')
+        [void] $h.Append('table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:24px}th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:13px}th{background:#f1f5f9}')
+        [void] $h.Append('.ok{color:#15803d}.away{color:#1d4ed8}.no{color:#b45309;font-weight:600}td.num{text-align:right}details{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;margin-bottom:10px}summary{cursor:pointer;font-weight:600}</style></head><body>')
+        [void] $h.Append('<h1>Compare</h1><div class="sub">' + (ConvertTo-Html ('{0} - {1} compared with {2}. Same name and same size counts as already there; the check proves the content.' -f (Get-Date).ToString('yyyy-MM-dd HH:mm'), $script:Source.Label, $script:Dest)) + '</div>')
+        [void] $h.Append('<table><tr><th>Folder</th><th>Files</th><th>Already on the PC</th><th>of these in another folder</th><th>Still to copy</th></tr>')
+        foreach ($f in $folders) {
+            [void] $h.Append(('<tr><td>{0}</td><td class="num">{1}</td><td class="num">{2}</td><td class="num">{3}</td><td class="num">{4} ({5})</td></tr>' -f (ConvertTo-Html $f.Name), $f.Files, $f.Present, $f.Elsewhere, $f.Missing, (Format-Bytes $f.MissingBytes)))
+        }
+        [void] $h.Append('</table>')
+        foreach ($f in $folders) {
+            [void] $h.Append('<details><summary>' + (ConvertTo-Html $f.Name) + (' - {0} files, {1} still to copy' -f $f.Files, $f.Missing) + '</summary><table><tr><th>File</th><th>Size</th><th>Date</th><th>Result</th><th>Found at</th></tr>')
+            foreach ($r in ($rows | Where-Object { $_.Folder -eq $f.Name })) {
+                $cls = 'ok'
+                if ($r.Status -like 'not*') { $cls = 'no' } elseif ($r.Status -like '*another*') { $cls = 'away' }
+                [void] $h.Append(('<tr><td>{0}</td><td class="num">{1}</td><td>{2}</td><td class="{3}">{4}</td><td>{5}</td></tr>' -f (ConvertTo-Html $r.Name), ([int64] $r.Size).ToString('N0', $script:Invariant), $r.Date, $cls, (ConvertTo-Html $r.Status), (ConvertTo-Html $r.Where)))
+            }
+            [void] $h.Append('</table></details>')
+        }
+        [void] $h.Append('</body></html>')
+        $report = Join-Path $meta "compare-$stamp.html"
+        [System.IO.File]::WriteAllText($report, $h.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+    }
+    catch { Write-Log "could not save the compare report: $(Get-ErrorText $_)" }
+    Write-Log ("compare: {0} folders, report {1}" -f $folders.Count, $report)
+    Send-Event 'CompareDone' @{ Report = $report; Folders = @($folders) }
+}
+
+# ---------------------------------------------------------------------------
 # delete command
 # ---------------------------------------------------------------------------
 
@@ -1224,7 +1416,7 @@ function Invoke-Delete {
                 if ($sizeNow -ne $record.Size) { $kept++; Write-Log "delete: kept $rel\$fileName - its size changed since the check"; continue }
                 $modNow = Get-ItemTimeUtc $item 'System.DateModified'
                 if ($record.Mod -and (-not $modNow -or [math]::Abs(($modNow - $record.Mod).TotalSeconds) -gt 2)) { $kept++; Write-Log "delete: kept $rel\$fileName - its date changed since the check"; continue }
-                if ($record.Dest -and $script:BadCopies.ContainsKey($record.Dest.ToLowerInvariant())) { $kept++; Write-Log "delete: kept $rel\$fileName - its copy on the PC failed a later check"; continue }
+                if ($record.Dest -and (Test-BadCopy -Key $(($rel + '|' + $fileName).ToLowerInvariant()) -Path $record.Dest)) { $kept++; Write-Log "delete: kept $rel\$fileName - its copy on the PC failed a later check"; continue }
                 $copy = New-Object System.IO.FileInfo($record.Dest)
                 if (-not $copy.Exists -or $copy.Length -ne $record.Size) { $kept++; Write-Log "delete: kept $rel\$fileName - the copy on the PC is missing or changed"; continue }
                 if ($item.IsFileSystem -and [IPhoneTransferApp.Native]::IsSameFile($item.Path, $record.Dest)) { $kept++; Write-Log "delete: kept $rel\$fileName - its 'copy' is the file itself"; continue }
@@ -1276,27 +1468,40 @@ function Invoke-EngineCommand {
     switch ($Command.Name) {
         'SetSource' {
             if ($Command.Kind -eq 'Folder') {
-                $path = (Resolve-Path -LiteralPath $Command.Path).ProviderPath
+                $path = (Resolve-Path -LiteralPath $Command.Path).ProviderPath.TrimEnd('\')
+                $label = $path
                 $names = @(Get-ChildItem -LiteralPath $path -Directory -Force | Where-Object { -not $_.Name.StartsWith('.') } | ForEach-Object { $_.Name } | Sort-Object)
-                $script:Source = @{ Kind = 'Folder'; Path = $path; Label = $path }
+                $looseFiles = @(Get-ChildItem -LiteralPath $path -File -Force -ErrorAction SilentlyContinue).Count
+                $parent = Split-Path -Parent $path
+                if ($names.Count -eq 0 -and $looseFiles -gt 0 -and $parent) {
+                    # The chosen folder holds the photos itself (one month folder, an SD card's
+                    # 100APPLE): treat it as the single folder to copy, kept under its own name.
+                    $names = @(Split-Path -Leaf $path)
+                    $path = $parent
+                    $looseFiles = 0
+                }
+                $script:Source = @{ Kind = 'Folder'; Path = $path; Label = $label }
                 $capacity = [IPhoneTransferApp.Native]::GetTotalBytes($path)
+                if ($looseFiles -gt 0) { Write-Log "source: $looseFiles files directly in $path are not part of any folder and are left out" }
             }
             else {
                 $state = Get-DeviceState
                 if ($state.State -ne 'Ready') { throw 'The iPhone is not ready - unlock it and tap Trust.' }
                 $script:Source = @{ Kind = 'Device'; Device = $state.Device; Storage = $state.Storage; Label = ('{0}\{1}' -f $state.Device, $state.Storage) }
                 $names = $state.Folders
+                $looseFiles = 0
                 $capacity = $state.Capacity
             }
             $script:Folders = @{}
             $script:Verified = @{}
             Write-Log "source: $($script:Source.Label) ($($names.Count) folders)"
-            Send-Event 'FolderList' @{ Names = [string[]] $names; Label = $script:Source.Label; Kind = $script:Source.Kind; Capacity = $capacity }
+            Send-Event 'FolderList' @{ Names = [string[]] $names; Label = $script:Source.Label; Kind = $script:Source.Kind; Capacity = $capacity; LooseFiles = $looseFiles }
         }
         'SetDestination' { Set-Destination $Command.Path }
         'Scan'           { Invoke-Scan -Names $Command.Folders }
         'Copy'           { Invoke-Copy -Names $Command.Folders }
         'Verify'         { Invoke-Verify -Names $Command.Folders -Full ([bool] $Command.Full) }
+        'Compare'        { Invoke-Compare -Names $Command.Folders }
         'Delete'         { Invoke-Delete -Names $Command.Folders }
         default          { throw "Unknown command $($Command.Name)" }
     }
