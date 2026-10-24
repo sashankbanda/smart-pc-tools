@@ -353,6 +353,7 @@ function Read-FolderEntries {
             Read-FolderEntries -Folder $item.GetFolder -Rel (Join-Path $Rel $item.Name) -List $List
             continue
         }
+        if ($sync.DemoScanDelayMs) { Start-Sleep -Milliseconds $sync.DemoScanDelayMs }   # tutorial recording only
         $entry = New-Entry $item $Rel
         [void] $List.Add($entry)
         $P.ScanFiles = [int64] $P.ScanFiles + 1
@@ -1356,6 +1357,7 @@ function Invoke-Delete {
     param([string[]] $Names)
     Assert-NoOverlap
     $allowUndo = ($script:Source.Kind -eq 'Folder')   # an ordinary folder can use the Recycle Bin; a phone cannot
+    if ($sync.DemoMode) { $allowUndo = $false }       # the tutorial's made-up photos are not worth a Recycle Bin
     $files = [int64] 0; $bytes = [int64] 0
     foreach ($name in $Names) {
         $v = $script:Verified[$name]

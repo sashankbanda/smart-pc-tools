@@ -36,11 +36,20 @@ param(
     [switch] $AutoFullCheck,
     [switch] $AutoInterrupt,
     [switch] $AutoCompare,
-    [string] $ScreenshotDir = ''
+    [string] $ScreenshotDir = '',
+
+    # Tutorial recording: a folder of made-up photos plays the part of the iPhone, and the
+    # steps are walked through by tools\make-tutorial.ps1. Never needed for real use.
+    [string] $DemoPhone = '',
+    [switch] $Tutorial
 )
 
 $ErrorActionPreference = 'Stop'
 $AutoFolders = @($AutoFolders | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+if ($Tutorial) {
+    if (-not $DemoPhone -or -not $Destination -or -not $ScreenshotDir) { throw '-Tutorial needs -DemoPhone, -Destination and -ScreenshotDir (it never runs on a real phone).' }
+    $AutoPilot = $true
+}
 
 # The app is started without a console window, so a problem at start-up would otherwise
 # vanish without a word. Say what happened instead.
@@ -1778,6 +1787,7 @@ function Invoke-EngineEvent {
             $app.DeviceGone = ($app.SourceKind -eq 'Device' -and $e.State -ne 'Ready')
         }
         'FolderList' {
+            if ($DemoPhone) { $e.Kind = 'Device'; $e.Label = 'Apple iPhone\Internal Storage'; $e.Capacity = [int64] 128GB; $e.LooseFiles = 0 }
             $app.SourceKind = $e.Kind; $app.SourceLabel = $e.Label; $app.Capacity = [int64] $e.Capacity
             $app.Rows.Clear(); $app.RowByName = @{}; $app.Summaries = @{}; $app.VerifiedOk = @{}
             foreach ($n in $e.Names) {
@@ -1969,7 +1979,9 @@ function Invoke-Safely {
     }
 }
 
-$ui.ConnectContinue.Add_Click({ Invoke-Safely { Start-Analysis -Kind 'Device' } })
+$ui.ConnectContinue.Add_Click({ Invoke-Safely {
+    if ($DemoPhone) { Start-Analysis -Kind 'Folder' -Path $DemoPhone } else { Start-Analysis -Kind 'Device' }
+} })
 $ui.UseFolderButton.Add_Click({ Invoke-Safely {
     $path = Select-FolderDialog 'Choose the folder to copy from (for example the DCIM folder of an SD card).' ''
     if ($path) { $script:SourceFolder = $path; $sync.Watch = $false; Start-Analysis -Kind 'Folder' -Path $path }
@@ -2110,8 +2122,109 @@ function Save-Screenshot {
         $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($bitmap))
         $stream = [System.IO.File]::Create((Join-Path $ScreenshotDir "$Name.png"))
         $encoder.Save($stream); $stream.Close()
+        # Where every named control is, so a tutorial can point at it.
+        $bounds = @{}
+        foreach ($key in $ui.Keys) {
+            $element = $ui[$key]
+            if ($element -isnot [System.Windows.FrameworkElement]) { continue }
+            $entry = @{}
+            if ($element -is [System.Windows.Controls.TextBlock]) { $entry.Text = $element.Text }
+            elseif ($element -is [System.Windows.Controls.ContentControl] -and $element.Content -is [string]) { $entry.Text = $element.Content }
+            if ($element.IsVisible -and $element.ActualWidth -gt 0) {
+                try {
+                    $r = $element.TransformToAncestor($content).TransformBounds((New-Object System.Windows.Rect 0, 0, $element.ActualWidth, $element.ActualHeight))
+                    $entry.X = [math]::Round($r.X, 1); $entry.Y = [math]::Round($r.Y, 1); $entry.W = [math]::Round($r.Width, 1); $entry.H = [math]::Round($r.Height, 1)
+                }
+                catch { }
+            }
+            if ($entry.Count -gt 0) { $bounds[$key] = $entry }
+        }
+        [System.IO.File]::WriteAllText((Join-Path $ScreenshotDir "$Name.json"), ($bounds | ConvertTo-Json -Depth 3), (New-Object System.Text.UTF8Encoding($false)))
     }
     catch { Write-UiLog "screenshot failed: $($_.Exception.Message)" }
+}
+
+$tut = @{ Stage = 'start'; Since = [DateTime]::UtcNow; Done = @{} }
+
+function Step-Tutorial {
+    # Walks the demo through every step, pressing the same buttons a person would, and saves a
+    # screenshot (plus where each control is) at each moment the tutorial video explains.
+    $elapsed = ([DateTime]::UtcNow - $tut.Since).TotalSeconds
+    $go = { param($s) $tut.Stage = $s; $tut.Since = [DateTime]::UtcNow; Write-UiLog "tutorial -> $s" }
+    $p = $sync.Progress
+    switch ($tut.Stage) {
+        'start' {
+            if ($elapsed -lt 2) { return }
+            Save-Screenshot '01-connect-looking'
+            Invoke-EngineEvent @{ Type = 'DeviceState'; State = 'Locked'; Device = 'Apple iPhone' }
+            & $go 'locked'
+        }
+        'locked' {
+            if ($elapsed -lt 0.6) { return }
+            Save-Screenshot '02-connect-locked'
+            $names = [string[]] @(Get-ChildItem -LiteralPath $DemoPhone -Directory | ForEach-Object { $_.Name } | Sort-Object)
+            Invoke-EngineEvent @{ Type = 'DeviceState'; State = 'Ready'; Device = 'Apple iPhone'; Storage = 'Internal Storage'; Capacity = [int64] 128GB; Folders = $names }
+            & $go 'ready'
+        }
+        'ready' {
+            if ($elapsed -lt 0.6) { return }
+            Save-Screenshot '03-connect-ready'
+            Invoke-Click $ui.ConnectContinue
+            & $go 'scanning'
+        }
+        'scanning' {
+            if ($app.Scanning -and [int] $p.ScanIndex -ge 3 -and -not $tut.Done['scan']) { $tut.Done['scan'] = $true; Save-Screenshot '04-scanning' }
+            if ($app.ScanDone -and -not $sync.Busy -and $elapsed -gt 1) { Save-Screenshot '05-choose-destination'; & $go 'dest' }
+        }
+        'dest' {
+            if (-not $tut.Done['dest']) { $tut.Done['dest'] = $true; Set-Destination $Destination; return }
+            if ($app.AutoSelected -and -not $sync.Busy -and $elapsed -gt 1.5) {
+                Update-Selection
+                Save-Screenshot '06-recommended'
+                Invoke-Click $ui.CompareButton
+                & $go 'compare'
+            }
+        }
+        'compare' {
+            if ($app.CompareResult -and -not $sync.Busy -and $elapsed -gt 0.5) { Invoke-Click $ui.StartCopyButton; & $go 'copy' }
+        }
+        'copy' {
+            $done = [double] $p.BytesDone + [double] $p.CurrentBytes
+            if ($app.CopyRunning -and [double] $p.BytesTotal -gt 0 -and $done -gt 0.25 * [double] $p.BytesTotal -and [double] $p.Speed -gt 0 -and -not $tut.Done['c1']) {
+                $tut.Done['c1'] = $true; Save-Screenshot '07-copying'
+                # What the screen looks like while the app waits for an unplugged iPhone.
+                Invoke-EngineEvent @{ Type = 'Waiting'; On = $true }
+                $ui.CopyRate.Text = 'Waiting for the iPhone...'
+                Save-Screenshot '08-disconnected'
+                Invoke-EngineEvent @{ Type = 'Waiting'; On = $false }
+                $tut.Done['c2'] = $true
+                return
+            }
+            if ($app.Page -eq 'Check') { & $go 'check' }
+        }
+        'check' {
+            if ($app.CheckRunning -and -not $tut.Done['k1'] -and [double] $p.BytesDone -gt 0) { $tut.Done['k1'] = $true; Save-Screenshot '09-checking' }
+            if ($app.CheckDone -and -not $app.CheckRunning -and $elapsed -gt 1) { Save-Screenshot '10-checked'; Invoke-Click $ui.GoDeleteButton; & $go 'delete' }
+        }
+        'delete' {
+            if ($elapsed -lt 1) { return }
+            Save-Screenshot '11-free-up'
+            foreach ($r in $app.DeleteRows) { $r.Selected = $true }
+            $ui.DeleteConfirmCheck.IsChecked = $true
+            Update-DeleteSelection
+            Save-Screenshot '12-free-up-ready'
+            Invoke-Click $ui.DeleteButton
+            & $go 'deleting'
+        }
+        'deleting' {
+            if ($app.DeleteDone -and $elapsed -gt 1) { Save-Screenshot '13-done'; & $go 'finish' }
+        }
+        'finish' {
+            $tut.Stage = 'closing'
+            $app.ForceClose = $true
+            $window.Close()
+        }
+    }
 }
 
 function Invoke-Click {
@@ -2241,7 +2354,8 @@ $timer.Add_Tick({
             'Check'   { Update-CheckLive }
             'Delete'  { Update-DeleteLive; Update-DeleteSelection }
         }
-        if ($AutoPilot) { Step-AutoPilot }
+        if ($Tutorial) { Step-Tutorial }
+        elseif ($AutoPilot) { Step-AutoPilot }
     }
     catch { Write-UiLog ("tick failed: {0} {1}" -f $_.Exception.Message, $_.ScriptStackTrace) }
 })
@@ -2262,6 +2376,7 @@ $worker.Runspace = $runspace
 $handle = $worker.BeginInvoke()
 
 Show-Page 'Connect'
+if ($DemoPhone) { $sync.Watch = $false; $sync.DemoMode = $true; $sync.DemoScanDelayMs = 12 }
 if ($SourceFolder) {
     $ui.ConnectTitle.Text = 'Using a folder on this PC'
     $ui.ConnectDetail.Text = $SourceFolder
