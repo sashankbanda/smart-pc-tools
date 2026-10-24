@@ -1,4 +1,4 @@
-# Smart Transfer
+# Smart PC Tools
 
 Three simple, free tools for your Windows PC. Each one asks you one easy question at a time - like a ticket machine - and never deletes or moves anything until you have seen exactly what will happen and said yes.
 
