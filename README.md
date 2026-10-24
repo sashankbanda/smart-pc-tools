@@ -84,7 +84,7 @@ Each folder gets a verdict - *All 2,159 match - 100% safe*, or which files need 
 
 ### 5. Free up iPhone (optional)
 
-Only folders that passed the check with **every single file matching** are offered. You tick the ones to remove, confirm that you understand, and confirm once more. Then:
+Folders where **every single file matched** are offered in full. A folder where a few files did not match (for example edited videos the iPhone would not hand over) can still be freed up partly: only the files that matched are removed, and the problem files stay on the iPhone **together with every file of the photos they belong to** (original, Live Photo video, edit and edit instructions) - deleting one part of a photo on an iPhone can remove the whole photo. You tick the ones to remove, confirm that you understand, and confirm once more. Then:
 
 - just before each file is deleted, its copy on the PC is confirmed again
 - photos added to a folder after the check are never deleted

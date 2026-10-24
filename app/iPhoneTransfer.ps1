@@ -852,7 +852,7 @@ $app = @{
     Dest = ''; Speed = [double] $settings.Speed
     Scanning = $false; ScanDone = $false; AutoSelected = $false
     CopyFolders = @(); CopyStats = $null; CopyRunning = $false; CopyDone = $null
-    CheckFolders = @(); CheckRunning = $false; CheckDone = $null; Report = ''; VerifiedOk = @{}
+    CheckFolders = @(); CheckRunning = $false; CheckDone = $null; Report = ''; VerifiedOk = @{}; PartialOk = @{}
     DeleteRunning = $false; DeleteDone = $null
     Session = $null; Waiting = $false; DeviceGone = $false; ForceClose = $false; LastFreeCheck = [DateTime]::MinValue
     Free = [int64] -1; Total = [int64] -1
@@ -1099,7 +1099,7 @@ function Set-Destination {
     }
     catch { Show-Message "This app cannot save files in $probeDir.`r`n`r`nPlease choose another folder." 'iPhone Transfer' 'Warning'; return }
 
-    if ($app.Dest -ne $Path) { $app.VerifiedOk = @{} }   # checks were made against the old destination
+    if ($app.Dest -ne $Path) { $app.VerifiedOk = @{}; $app.PartialOk = @{} }   # checks were made against the old destination
     $app.Dest = $Path
     $ui.DestText.Text = $Path
     $ui.DestText.ToolTip = $Path
@@ -1615,10 +1615,12 @@ function Update-CheckRow {
     elseif ($Summary.Ok) {
         $row.Status = [string] [char] 0x2713 + (' All {0} match - 100% safe' -f (Format-Count $Summary.OkFiles)); $row.StatusColor = $GREEN
         $app.VerifiedOk[$Summary.Name] = $Summary
+        $app.PartialOk.Remove($Summary.Name)
     }
     else {
         $row.Status = ('{0} of {1} match - {2}' -f (Format-Count $Summary.OkFiles), (Format-Count $Summary.PhoneFiles), (Format-Plural $Summary.ProblemCount 'needs attention' 'need attention')); $row.StatusColor = $AMBER
         $app.VerifiedOk.Remove($Summary.Name)
+        if ($Summary.DeletableFiles -gt 0) { $app.PartialOk[$Summary.Name] = $Summary } else { $app.PartialOk.Remove($Summary.Name) }
         foreach ($problem in $Summary.Problems) { [void] $ui.ProblemsList.Items.Add(('{0}   -   {1}' -f $problem.Name, $problem.Detail)) }
         if ($Summary.ProblemCount -gt $Summary.Problems.Count) { [void] $ui.ProblemsList.Items.Add(('... and {0} more in the report' -f ($Summary.ProblemCount - $Summary.Problems.Count))) }
         $ui.ProblemsExpander.Visibility = 'Visible'
@@ -1635,7 +1637,7 @@ function Complete-Check {
     $ui.CheckProgressCard.Visibility = 'Collapsed'
     $ui.OpenReportButton.IsEnabled = [bool] $app.Report
     $ui.FullCheckButton.IsEnabled = $true
-    $okFolders = @($app.CheckFolders | Where-Object { $app.VerifiedOk.ContainsKey($_) })
+    $okFolders = @($app.CheckFolders | Where-Object { $app.VerifiedOk.ContainsKey($_) -or $app.PartialOk.ContainsKey($_) })
     $ui.GoDeleteButton.IsEnabled = ($okFolders.Count -gt 0)
 
     $phoneFiles = 0; $okFiles = 0
@@ -1662,7 +1664,7 @@ function Complete-Check {
         $bad = @($app.CheckRows | Where-Object { $_.StatusColor -ne $GREEN })
         $ui.VerdictTitle.Text = ('{0} not fully on this PC yet.' -f (Format-Plural $bad.Count 'folder is' 'folders are'))
         Set-Color $ui.VerdictTitle 'Foreground' '#78350F'
-        $ui.VerdictText.Text = 'Those folders will not be offered for deleting. Press "Copy the missing files" to fix them; folders marked 100% safe can already be freed up.'
+        $ui.VerdictText.Text = 'Press "Copy the missing files" to try them again (unplug and replug the iPhone first if it stopped sending files). You can already free up everything that matched: problem files - and every file of the photos they belong to - stay on the iPhone.'
         Set-Color $ui.VerdictText 'Foreground' '#92400E'
         $ui.FixButton.Visibility = 'Visible'
         $ui.CheckTitle.Text = 'Check complete - some files need attention'
@@ -1690,6 +1692,19 @@ function Show-DeletePage {
         $r.Files = Format-Count $s.OkFiles; $r.FileCount = [int64] $s.OkFiles
         $r.Size = Format-Bytes $s.PhoneBytes; $r.Bytes = [int64] $s.PhoneBytes
         $r.Status = [string] [char] 0x2713 + ' Every file checked'; $r.StatusColor = $GREEN
+        $r.Selected = $false
+        $app.DeleteRows.Add($r)
+    }
+    foreach ($n in ($app.PartialOk.Keys | Sort-Object)) {
+        if ($app.VerifiedOk.ContainsKey($n)) { continue }
+        $s = $app.PartialOk[$n]
+        $r = New-Object IPhoneTransferApp.Row
+        $r.Name = $n
+        $sum = $app.Summaries[$n]
+        if ($sum) { $r.Dates = Format-Dates $sum.FirstDate $sum.LastDate }
+        $r.Files = Format-Count $s.DeletableFiles; $r.FileCount = [int64] $s.DeletableFiles
+        $r.Size = Format-Bytes $s.DeletableBytes; $r.Bytes = [int64] $s.DeletableBytes
+        $r.Status = ('Partly: {0} stay on the iPhone (files that did not match, and the photos they belong to)' -f (Format-Plural $s.KeptFiles 'file' 'files')); $r.StatusColor = $AMBER
         $r.Selected = $false
         $app.DeleteRows.Add($r)
     }
@@ -1775,7 +1790,7 @@ function Complete-Delete {
     $ui.DeleteConfirmCheck.Visibility = 'Collapsed'
     if ($app.SourceKind -eq 'Device') { $ui.DeleteSelectionText.Text = 'All done. You can unplug the iPhone now.' }
     else { $ui.DeleteSelectionText.Text = 'All done.' }
-    foreach ($n in @($app.DeleteRows | ForEach-Object { $_.Name })) { $app.VerifiedOk.Remove($n) }
+    foreach ($n in @($app.DeleteRows | ForEach-Object { $_.Name })) { $app.VerifiedOk.Remove($n); $app.PartialOk.Remove($n) }
     [System.Media.SystemSounds]::Asterisk.Play()
 }
 
@@ -1793,7 +1808,7 @@ function Invoke-EngineEvent {
         'FolderList' {
             if ($DemoPhone) { $e.Kind = 'Device'; $e.Label = 'Apple iPhone\Internal Storage'; $e.Capacity = [int64] 128GB; $e.LooseFiles = 0 }
             $app.SourceKind = $e.Kind; $app.SourceLabel = $e.Label; $app.Capacity = [int64] $e.Capacity
-            $app.Rows.Clear(); $app.RowByName = @{}; $app.Summaries = @{}; $app.VerifiedOk = @{}
+            $app.Rows.Clear(); $app.RowByName = @{}; $app.Summaries = @{}; $app.VerifiedOk = @{}; $app.PartialOk = @{}
             foreach ($n in $e.Names) {
                 $r = New-Object IPhoneTransferApp.Row
                 $r.Name = $n; $r.Status = 'Waiting to be read'; $r.StatusColor = $GRAY; $r.CanSelect = $false

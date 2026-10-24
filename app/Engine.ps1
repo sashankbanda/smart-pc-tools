@@ -31,6 +31,7 @@ $script:Source         = $null    # @{ Kind = 'Device' | 'Folder'; Device; Stora
 $script:Folders        = @{}      # folder name -> @{ Files = list of entries; Error }
 $script:Verified       = @{}      # folder name -> @{ Ok; Files = key -> record }
 $script:Manifest       = @{}      # "folder|name" -> @{ Dest; Sha; Size }
+$script:Unavailable    = @{}      # "folder|name" -> why the phone would not hand the file over
 $script:BadCopies      = @{}      # "source key>pc path" pairs the check found not to match
 $script:Dest           = ''
 $script:Log            = $null
@@ -511,6 +512,17 @@ function Get-DirIndex {
 
 function Get-EntryKey { param($Entry) return ($Entry.Rel + '|' + $Entry.Name).ToLowerInvariant() }
 
+function Get-AssetKey {
+    # Which photo a file belongs to. On an iPhone one photo is several files: IMG_0077.JPG,
+    # its Live Photo video IMG_0077.MOV, the edit IMG_E0077.JPG / IMG_E0077.MOV and the edit
+    # instructions IMG_0077.AAE / IMG_O0077.AAE. Deleting any one of them from the phone can
+    # remove the whole photo, so they are kept or deleted together.
+    param([string] $Rel, [string] $Name)
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($Name)
+    if ($stem -match '^([A-Za-z]{3}_|[A-Za-z]{4})([EO])?(\d{4,5})$') { $stem = $Matches[1] + $Matches[3] }
+    return ($Rel + '|' + $stem).ToLowerInvariant()
+}
+
 # A PC file the check found not to match a particular source file. Per source file, because
 # the same PC file can be the right copy of another source file with the same name and size.
 function Test-BadCopy { param([string] $Key, [string] $Path) return $script:BadCopies.ContainsKey($Key + '>' + $Path.ToLowerInvariant()) }
@@ -953,6 +965,7 @@ function Copy-OneFile {
                 $resetNeeded = $true
             }
             elseif ($attempt -ge 4) {
+                if ($text -match 'received 0 bytes|0x8007001E|never arrived|0x80042007|0x8007065D') { $script:Unavailable[$key] = $text }
                 return @{ Ok = $false; Error = $text; Attempts = $attempt }
             }
             else {
@@ -1227,6 +1240,8 @@ function Invoke-Verify {
 
             if ($null -eq $copy) {
                 $record.Status = 'Missing'; $record.Detail = 'not on the PC'
+                $why = $script:Unavailable[(Get-EntryKey $entry)]
+                if ($why) { $record.Detail = 'not on the PC - the iPhone lists it but would not hand it over (' + $why + ')' }
             }
             else {
                 $key = Get-EntryKey $entry
@@ -1307,11 +1322,21 @@ function Invoke-Verify {
 
         $readable = $null -ne $lists[$name]
         $ok = $readable -and $phoneFiles -gt 0 -and $okCount -eq $phoneFiles
-        $script:Verified[$name] = @{ Ok = $ok; Files = $okFiles; At = (Get-Date) }
+        # Photos with any file that did not match stay on the phone completely - every file of them.
+        $blocked = @{}
+        foreach ($r in $folderFiles) { if ($r.Status -ne 'OK') { $blocked[(Get-AssetKey $r.Rel $r.Name)] = $true } }
+        $deletable = 0; $deletableBytes = [int64] 0
+        foreach ($k in $okFiles.Keys) {
+            $parts = $k.Split('|')
+            if (-not $blocked.ContainsKey((Get-AssetKey $parts[0] $parts[1]))) { $deletable++; $deletableBytes += $okFiles[$k].Size }
+        }
+        if (-not $readable) { $deletable = 0; $deletableBytes = [int64] 0 }
+        $script:Verified[$name] = @{ Ok = $ok; Files = $okFiles; Blocked = $blocked; Deletable = $deletable; At = (Get-Date) }
         $summary = @{
             Name = $name; Ok = $ok; Readable = $readable
             PhoneFiles = $phoneFiles; PhoneBytes = $phoneBytes; PcFiles = $pcFiles; PcBytes = $pcBytes; OkFiles = $okCount
             Problems = @($problems | Select-Object -First 200); ProblemCount = $problems.Count
+            DeletableFiles = $deletable; DeletableBytes = $deletableBytes; KeptFiles = ($phoneFiles - $deletable)
         }
         [void] $summaries.Add($summary)
         Write-Log ("check {0}: {1} of {2} files OK" -f $name, $okCount, $phoneFiles)
@@ -1483,7 +1508,7 @@ function Invoke-Delete {
     $files = [int64] 0; $bytes = [int64] 0
     foreach ($name in $Names) {
         $v = $script:Verified[$name]
-        if ($v -and $v.Ok) { $files += $v.Files.Count; foreach ($r in $v.Files.Values) { $bytes += $r.Size } }
+        if ($v -and $v.Deletable -gt 0) { $files += $v.Deletable; foreach ($r in $v.Files.Values) { $bytes += $r.Size } }
     }
     Reset-Progress -Phase 'Delete' -FilesTotal $files -BytesTotal $bytes -Step 'Deleting from the iPhone'
 
@@ -1499,8 +1524,8 @@ function Invoke-Delete {
         foreach ($name in $Names) {
             Assert-NotCancelled
             $v = $script:Verified[$name]
-            if (-not $v -or -not $v.Ok) {
-                Write-Log "delete: refused for $name - it did not pass the check"
+            if (-not $v -or $v.Deletable -le 0) {
+                Write-Log "delete: refused for $name - none of its files passed the check"
                 Send-Event 'FolderDeleted' @{ Name = $name; Deleted = 0; DeletedBytes = [int64] 0; Kept = 0; Failed = 0; Refused = $true; Remaining = -1 }
                 continue
             }
@@ -1529,10 +1554,23 @@ function Invoke-Delete {
                 }
             }
 
+            # Photos to leave alone completely: those with a file that did not pass the check, and
+            # those with a file that appeared or changed since (it is not in the checked list).
+            $blocked = @{}
+            if ($v.Blocked) { foreach ($k in $v.Blocked.Keys) { $blocked[$k] = $true } }
+            $nameOf = @{}
+            foreach ($pair in $items) {
+                $n = Get-RealName $pair[0]
+                $nameOf[[string] $pair[0].Path] = $n
+                if (-not $v.Files.ContainsKey(($pair[1] + '|' + $n).ToLowerInvariant())) { $blocked[(Get-AssetKey $pair[1] $n)] = $true }
+            }
+
             foreach ($pair in $items) {
                 Assert-NotCancelled
                 $item = $pair[0]; $rel = $pair[1]
-                $fileName = Get-RealName $item
+                $fileName = $nameOf[[string] $item.Path]
+                if (-not $fileName) { $fileName = Get-RealName $item }
+                if ($blocked.ContainsKey((Get-AssetKey $rel $fileName))) { $kept++; continue }   # part of a photo that is not fully on the PC
                 $record = $v.Files[($rel + '|' + $fileName).ToLowerInvariant()]
                 Set-Current -Name $fileName -Folder $name -Size $record.Size
                 if ($null -eq $record) { $kept++; continue }                  # new since the check
