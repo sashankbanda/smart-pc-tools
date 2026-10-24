@@ -320,6 +320,8 @@ The manifest is handy later: `Get-FileHash` on any copied file should match its 
 | --- | --- |
 | The window does not open | Look in `%LOCALAPPDATA%\iPhoneTransfer\logs\startup-errors.log`. Starting `iPhone Transfer.cmd` from the unzipped folder (not from inside the ZIP) matters. |
 | "Apple iPhone found - please unlock it" does not go away | Unlock the phone and tap Trust. Tapped *Don't Trust* by mistake? On the iPhone: *Settings > General > Transfer or Reset iPhone > Reset > Reset Location & Privacy*, then plug in again. |
+| *The iPhone has stopped sending files* | The phone is connected but has stopped handing over files (it happens after long transfers). Unplug it, plug it back in and unlock it - copying continues by itself. Files that failed are tried once more at the end; anything still missing is listed by the check, and copying again later picks it up. |
+| Speed drops to a few KB/s and the time left jumps to hours | Same cause - the version before 20 October 2026 kept retrying instead of saying so. Stop, close the app, open it again, and press Copy: it continues where it stopped. |
 | A folder shows *Empty on iPhone* | Normal on a first read - press *Read again*. If it stays empty, those photos are only in iCloud (*Settings > Photos > Download and Keep Originals*). |
 | *Free up space on the iPhone* stays grey | No folder passed the check with every file matching. Use *Copy the missing files*, then check again. |
 | A file is reported as *Different* | The copy on the PC does not match the phone. Press *Copy the missing files* - the bad copy is kept, and a fresh copy is saved next to it as `name_1.ext`. |

@@ -36,6 +36,7 @@ param(
     [switch] $AutoFullCheck,
     [switch] $AutoInterrupt,
     [switch] $AutoCompare,
+    [switch] $AutoTrouble,
     [string] $ScreenshotDir = '',
 
     # Tutorial recording: a folder of made-up photos plays the part of the iPhone, and the
@@ -580,13 +581,14 @@ function Save-Settings {
         </StackPanel>
 
         <Border x:Name="WaitingBanner" Grid.Row="1" Visibility="Collapsed" Margin="0,16,0,0" Background="#FEF3C7" BorderBrush="#FCD34D" BorderThickness="1" CornerRadius="12" Padding="18,14">
-          <StackPanel Orientation="Horizontal">
-            <TextBlock Style="{StaticResource Icon}" Text="&#xE7BA;" FontSize="20" Foreground="#B45309"/>
+          <DockPanel>
+            <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE7BA;" FontSize="20" Foreground="#B45309"/>
+            <Button x:Name="TryAgainButton" DockPanel.Dock="Right" Content="Try again now" Style="{StaticResource Small}" Visibility="Collapsed" VerticalAlignment="Center" Margin="12,0,0,0"/>
             <StackPanel Margin="12,0,0,0">
               <TextBlock x:Name="WaitingTitle" Text="The iPhone was disconnected" FontWeight="SemiBold" Foreground="#78350F" FontSize="15"/>
               <TextBlock x:Name="WaitingText" Text="Plug it back in and unlock it - copying continues by itself from where it stopped. Nothing copied so far is lost." Foreground="#92400E" FontSize="13" TextWrapping="Wrap"/>
             </StackPanel>
-          </StackPanel>
+          </DockPanel>
         </Border>
 
         <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,16,0,0" Padding="24,20">
@@ -836,6 +838,7 @@ $sync.Progress = [hashtable]::Synchronized(@{})
 $sync.Cancel = $false; $sync.Pause = $false; $sync.Quit = $false; $sync.Busy = $false
 $sync.Watch = (-not $SourceFolder)
 $sync.NewDest = $null
+$sync.TryAgain = $false
 $sync.LogPath = $LogPath
 
 $settings = Get-Settings
@@ -1481,6 +1484,7 @@ function Update-CopyLive {
     if ([double] $p.Speed -gt 0) { $rate = (Format-Bytes ([double] $p.Speed)) + '/s' }
     if ([double] $p.Eta -ge 0) { $rate += $DOT + (Format-Eta ([double] $p.Eta)) + ' left' }
     if ($p.Paused) { $rate = 'Paused - press Resume to carry on' }
+    if ($p.Waiting) { $rate = 'Waiting for the iPhone...' }
     $ui.CopyRate.Text = $rate
     $current = $p.Current
     if ($current) {
@@ -1884,6 +1888,25 @@ function Invoke-EngineEvent {
             $ui.CopyStatCopied.Text = 'Copied ' + (Format-Count ([int64] $e.TotalCopied))
             $ui.CopyStatFailed.Text = 'Problems ' + (Format-Count ([int64] $e.TotalFailed))
         }
+        'Trouble' {
+            # Connected, but the phone has stopped handing over files.
+            $app.Waiting = [bool] $e.On
+            if ($e.On) {
+                $ui.WaitingTitle.Text = 'The iPhone has stopped sending files'
+                $ui.WaitingText.Text = 'Unplug the iPhone, plug it back in and unlock it - copying then continues by itself. Or press "Try again now". Nothing copied so far is lost; files that failed are tried again at the end.'
+                $ui.TryAgainButton.Visibility = 'Visible'
+                $ui.WaitingBanner.Visibility = 'Visible'
+                $ui.CopyRate.Text = 'Waiting for the iPhone...'
+                $window.TaskbarItemInfo.ProgressState = 'Paused'
+                [System.Media.SystemSounds]::Exclamation.Play()
+            }
+            else {
+                $ui.WaitingBanner.Visibility = 'Collapsed'; $ui.TryAgainButton.Visibility = 'Collapsed'
+                $ui.WaitingTitle.Text = 'The iPhone was disconnected'
+                $ui.WaitingText.Text = 'Plug it back in and unlock it - copying continues by itself from where it stopped. Nothing copied so far is lost.'
+                $window.TaskbarItemInfo.ProgressState = 'Normal'
+            }
+        }
         'Waiting' {
             $app.Waiting = [bool] $e.On
             if ($e.On) {
@@ -2043,6 +2066,7 @@ $ui.StopButton.Add_Click({ Invoke-Safely {
         $ui.CopyRate.Text = 'Stopping...'
     }
 } })
+$ui.TryAgainButton.Add_Click({ Invoke-Safely { $sync.TryAgain = $true; $ui.TryAgainButton.Visibility = 'Collapsed'; $ui.CopyRate.Text = 'Trying again...' } })
 $ui.CopyBackButton.Add_Click({ Invoke-Safely { Show-Page 'Analyze'; Update-Recommendation } })
 $ui.CopyRetryButton.Add_Click({ Invoke-Safely { Start-Copy -Names $app.CopyFolders } })
 $ui.OpenReportButton.Add_Click({ Invoke-Safely { Open-Path $app.Report } })
@@ -2269,6 +2293,10 @@ function Step-AutoPilot {
         }
         'copy' {
             if ($app.CopyRunning -and -not $auto.Shots['copying'] -and [double] $sync.Progress.BytesDone -gt 0) { Save-Screenshot '3-copying'; $auto.Shots['copying'] = $true }
+            if ($AutoTrouble -and $app.CopyRunning -and $auto.Shots['copying'] -and -not $auto.Shots['trouble']) {
+                $auto.Shots['trouble'] = $true
+                Invoke-EngineEvent @{ Type = 'Trouble'; On = $true }; Save-Screenshot '3-trouble'; Invoke-EngineEvent @{ Type = 'Trouble'; On = $false }
+            }
             # Testing stop / continue: press Stop part-way through, then Continue.
             if ($AutoInterrupt -and -not $auto.Shots['interrupted'] -and $app.CopyRunning -and [double] $sync.Progress.BytesTotal -gt 0 -and
                 ([double] $sync.Progress.BytesDone + [double] $sync.Progress.CurrentBytes) -gt 0.3 * [double] $sync.Progress.BytesTotal) {

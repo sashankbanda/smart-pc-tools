@@ -479,9 +479,16 @@ function Import-Manifest {
     $path = Join-Path (Get-MetaDirectory) 'manifest.csv'
     if (-not (Test-Path -LiteralPath $path)) { return }
     try {
+        $previousSha = ''
         foreach ($row in (Import-Csv -LiteralPath $path)) {
             if (@('copied', 'renamed', 'replaced') -notcontains $row.status) { continue }
-            if (-not $row.sha256) { continue }
+            $thisSha = [string] $row.sha256
+            $samePrevious = ($thisSha -and $thisSha -eq $previousSha)
+            $previousSha = $thisSha
+            if (-not $thisSha) { continue }
+            $tries = 1
+            [void] [int]::TryParse([string] $row.attempts, [ref] $tries)
+            if ($tries -gt 1 -or $samePrevious) { [void] $script:Manifest.Remove(([string] $row.folder + '|' + [string] $row.name).ToLowerInvariant()); continue }
             $size = [int64] 0
             [void] [int64]::TryParse([string] $row.size_bytes, [ref] $size)
             $script:Manifest[([string] $row.folder + '|' + [string] $row.name).ToLowerInvariant()] = @{ Dest = [string] $row.destination; Sha = ([string] $row.sha256).ToUpperInvariant(); Size = $size }
@@ -729,11 +736,13 @@ function Read-SourceStream {
             $expected = $deviceIn.Length
         }
         if ($Target) { $out = New-Object System.IO.FileStream($Target, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, 1MB) }
+        $head = $null
         while ($true) {
             Assert-NotCancelled
             if ($fileIn) { $n = $fileIn.Read($buffer, 0, $buffer.Length) }
             else         { $n = $deviceIn.Read($buffer, $buffer.Length) }
             if ($n -le 0) { break }
+            if ($null -eq $head) { $head = New-Object byte[] ([math]::Min(32, $n)); [Array]::Copy($buffer, $head, $head.Length) }
             if ($out) { $out.Write($buffer, 0, $n) }
             [void] $sha.TransformBlock($buffer, 0, $n, $null, 0)
             $total += $n
@@ -749,7 +758,7 @@ function Read-SourceStream {
     [void] $sha.TransformFinalBlock($buffer, 0, 0)
     $hash = ([System.BitConverter]::ToString($sha.Hash)).Replace('-', '')
     $sha.Dispose()
-    return @{ Bytes = $total; Sha = $hash; Expected = $expected }
+    return @{ Bytes = $total; Sha = $hash; Expected = $expected; Head = $head }
 }
 
 function Get-FileSha256 {
@@ -785,7 +794,7 @@ function Copy-ViaExplorer {
     $target = $script:Shell.NameSpace($private)
     if ($null -eq $target) { throw "cannot open the staging folder $private" }
     $arrival = Join-Path $private $Entry.Name
-    $timeout = [math]::Max([double] 300, [double] $Entry.Size / 256KB)
+    $timeout = [math]::Max([double] 60, [double] $Entry.Size / 1MB * 2)
     $target.CopyHere($Entry.Item, $COPY_FLAGS)
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt $timeout) {
@@ -822,27 +831,79 @@ function Set-FileTimes {
     catch { }
 }
 
+function Test-Signature {
+    # Does the start of the data look like this kind of file? A phone in a bad state has been
+    # seen to hand over the previous file's bytes; this catches that when the types differ.
+    # Unknown types pass. Returns $true when it looks right.
+    param([byte[]] $Head, [string] $Extension)
+    if ($null -eq $Head -or $Head.Length -lt 12) { return $true }
+    $ascii = [System.Text.Encoding]::ASCII.GetString($Head, 0, [math]::Min($Head.Length, 16))
+    $box = [System.Text.Encoding]::ASCII.GetString($Head, 4, 4)
+    switch ($Extension) {
+        { $_ -in '.jpg', '.jpeg' } { return ($Head[0] -eq 0xFF -and $Head[1] -eq 0xD8) }
+        '.png'  { return ($Head[0] -eq 0x89 -and $ascii.Substring(1, 3) -eq 'PNG') }
+        { $_ -in '.heic', '.heif', '.mov', '.mp4', '.m4v', '.3gp' } { return (@('ftyp', 'moov', 'wide', 'mdat', 'free', 'skip', 'pnot') -contains $box) }
+        '.aae'  { return ($ascii.TrimStart([char] 0xFEFF, ' ', "`r", "`n", "`t").StartsWith('<?xml') -or $ascii.StartsWith('bplist') -or $ascii.TrimStart().StartsWith('<')) }
+        { $_ -in '.dng', '.tif', '.tiff' } { return ($ascii.StartsWith('II') -or $ascii.StartsWith('MM')) }
+        '.gif'  { return $ascii.StartsWith('GIF8') }
+        '.webp' { return $ascii.StartsWith('RIFF') }
+        default { return $true }
+    }
+}
+
+function Reset-DeviceConnection {
+    # A fresh connection to the phone after it handed over wrong data or stopped answering.
+    Write-Log 'opening a fresh connection to the source'
+    $script:Shell = New-Object -ComObject Shell.Application
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+    Start-Sleep -Milliseconds 800
+}
+
 function Copy-OneFile {
     # Returns @{ Ok; Status; Path; Bytes; Sha; Error; DiskFull }. Never throws except for cancel.
     param($Job, [string] $StagingDirectory)
     $entry = $Job.Entry
+    $key = Get-EntryKey $entry
     $attempt = 0
     $disconnects = 0
     $useExplorer = $false
+    $shaky = $false        # an attempt got data that cannot have been this file
+    $suspect = $null       # SHA-256 of an attempt that looked wrong; accepted only if a fresh connection gives the same bytes
+    $note = ''
     while ($true) {
         $attempt++
         $staging = Join-Path $StagingDirectory ('{0}.{1}.part' -f (Get-SafeName $entry.Name), [guid]::NewGuid().ToString('N').Substring(0, 8))
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $resetNeeded = $false
         try {
             if ($useExplorer) { $result = Copy-ViaExplorer -Entry $entry -Staging $staging }
             else              { $result = Read-SourceStream -Entry $entry -Target $staging }
 
-            # Is what arrived trustworthy?
+            # Is what arrived this file, and complete?
             $expected = $result.Expected
             if ($expected -le 0) { $expected = $entry.Size }
             if ($result.Bytes -le 0 -and $expected -gt 0) { throw 'received 0 bytes' }
             if ($result.Bytes -le 0 -and $result.Expected -lt 0 -and $script:Source.Kind -eq 'Device') { throw 'received 0 bytes and the iPhone did not say how big the file is' }
-            if ($expected -gt 0 -and $result.Bytes -ne $expected) { throw ('size mismatch: received {0} bytes, expected {1}' -f $result.Bytes, $expected) }
+            if ($expected -gt 0 -and $result.Bytes -ne $expected) {
+                $shaky = $true; $resetNeeded = $true
+                throw ('size mismatch: received {0} bytes, expected {1}' -f $result.Bytes, $expected)
+            }
+            $looksWrong = ''
+            if (-not $result.FromExplorer -and -not (Test-Signature $result.Head $entry.Ext)) { $looksWrong = "the data does not look like a $($entry.Ext.TrimStart('.').ToUpperInvariant()) file" }
+            elseif ($script:LastCopy -and $script:LastCopy.Key -ne $key -and $script:LastCopy.Sha -eq $result.Sha) { $looksWrong = "the data is identical to the previous file ($($script:LastCopy.Name))" }
+            if ($looksWrong) {
+                if ($suspect -and $suspect -eq $result.Sha) {
+                    # A fresh connection gave exactly the same bytes: that is what the file holds.
+                    # Kept, but without a fingerprint, so the check reads it from the phone again.
+                    $shaky = $true
+                    $note = $looksWrong + ' - confirmed over a fresh connection'
+                }
+                else {
+                    $suspect = $result.Sha; $shaky = $true; $resetNeeded = $true
+                    throw $looksWrong
+                }
+            }
             $onDisk = (Get-Item -LiteralPath $staging -Force).Length
             if ($onDisk -ne $result.Bytes) { throw ('the staged file holds {0} bytes, expected {1}' -f $onDisk, $result.Bytes) }
             if (-not $result.ReadBack) {
@@ -863,15 +924,16 @@ function Copy-OneFile {
                 [System.IO.File]::Copy($staging, $final, $false); [System.IO.File]::Delete($staging)
             }
             $sw.Stop()
-            # Only bytes we read ourselves give a fingerprint of the source. An Explorer copy is
-            # hashed from the PC file, which proves nothing about the phone - record no
-            # fingerprint, so the check reads the phone file again.
+            # A fingerprint only counts when it is beyond doubt: bytes we read ourselves, in a
+            # transfer where the phone never handed over wrong data. Otherwise none is recorded
+            # and the check reads the file from the phone again.
             $fingerprint = $result.Sha
-            if ($result.FromExplorer) { $fingerprint = '' }
-            Write-ManifestRow -Status $status -Entry $entry -Size $result.Bytes -FinalPath $final -Sha $fingerprint -Seconds $sw.Elapsed.TotalSeconds -Attempts $attempt -ErrorText ''
+            if ($result.FromExplorer -or $shaky) { $fingerprint = '' }
+            Write-ManifestRow -Status $status -Entry $entry -Size $result.Bytes -FinalPath $final -Sha $fingerprint -Seconds $sw.Elapsed.TotalSeconds -Attempts $attempt -ErrorText $note
             Add-DestIndex -Path $final -Size $result.Bytes -Mod $entry.Mod
-            if ($fingerprint) { $script:Manifest[($entry.Rel + '|' + $entry.Name).ToLowerInvariant()] = @{ Dest = $final; Sha = $fingerprint; Size = $result.Bytes } }
-            else { [void] $script:Manifest.Remove(($entry.Rel + '|' + $entry.Name).ToLowerInvariant()) }
+            if ($fingerprint) { $script:Manifest[$key] = @{ Dest = $final; Sha = $fingerprint; Size = $result.Bytes } }
+            else { [void] $script:Manifest.Remove($key) }
+            $script:LastCopy = @{ Key = $key; Sha = $result.Sha; Name = $entry.Name }
             return @{ Ok = $true; Status = $status; Path = $final; Bytes = $result.Bytes; Sha = $result.Sha; Attempts = $attempt }
         }
         catch {
@@ -888,6 +950,7 @@ function Copy-OneFile {
                 if ($disconnects -gt 50) { return @{ Ok = $false; Error = $text; Attempts = $attempt } }
                 if (-not (Wait-ForDevice)) { throw (New-Object System.OperationCanceledException) }
                 $attempt--   # a disconnect is not the file's fault
+                $resetNeeded = $true
             }
             elseif ($attempt -ge 4) {
                 return @{ Ok = $false; Error = $text; Attempts = $attempt }
@@ -896,12 +959,40 @@ function Copy-OneFile {
                 Start-Sleep -Seconds ([math]::Min([double] 8, [math]::Pow(2, $attempt)))
             }
 
+            if ($resetNeeded -and $script:Source.Kind -eq 'Device') { Reset-DeviceConnection }
             # A fresh handle: the old one may have gone stale with the hiccup.
             try { $entry.Item = Get-SourceFile $entry } catch { Write-Log "  could not re-open it yet: $(Get-ErrorText $_)" }
             # Last try on a phone: let Explorer's own copy have a go, in case the stream is the problem.
             if ($attempt -eq 3 -and $script:Source.Kind -eq 'Device') { $useExplorer = $true }
         }
     }
+}
+
+function Wait-ForReplug {
+    # The phone is connected but has stopped handing over files. Usually unplugging it and
+    # plugging it back in (and unlocking it) fixes that. Wait for exactly that, or for the
+    # "Try again now" button, or for Stop.
+    Write-Log 'the source keeps failing - asking for it to be plugged in again'
+    $P.Waiting = $true
+    $sync.TryAgain = $false
+    Send-Event 'Trouble' @{ On = $true }
+    $sawGone = $false
+    try {
+        while (-not $sync.Cancel) {
+            if ($sync.TryAgain) { $sync.TryAgain = $false; Write-Log 'trying again (button)'; break }
+            Start-Sleep -Seconds 2
+            if ($script:Source.Kind -ne 'Device') { continue }
+            if (-not (Test-SourceAvailable)) { $sawGone = $true }
+            elseif ($sawGone) { Write-Log 'source was plugged in again'; break }
+        }
+    }
+    finally {
+        $P.Waiting = $false
+        Send-Event 'Trouble' @{ On = $false }
+    }
+    if ($sync.Cancel) { throw (New-Object System.OperationCanceledException) }
+    Reset-DeviceConnection
+    $script:Samples.Clear()
 }
 
 # ---------------------------------------------------------------------------
@@ -946,6 +1037,7 @@ function Invoke-Copy {
     Write-Log ("copy plan: {0} files ({1}) to copy, {2} already there" -f $jobs.Count, (Format-Bytes $bytes), $already)
 
     $copied = 0; $copiedBytes = [int64] 0; $renamed = 0
+    $script:LastCopy = $null
     $failed = New-Object System.Collections.ArrayList
     $stopReason = ''
     $cancelled = $false
@@ -955,7 +1047,14 @@ function Invoke-Copy {
     Open-Manifest
     [IPhoneTransferApp.Native]::KeepAwake($true)
     try {
-        foreach ($job in $jobs) {
+        # Files that fail are tried once more at the end, after everything else - a phone often
+        # manages a file later that it could not hand over a minute ago.
+        $queue = New-Object System.Collections.ArrayList
+        foreach ($job in $jobs) { [void] $queue.Add(@{ Job = $job; Round = 1 }) }
+        $inARow = 0
+        for ($q = 0; $q -lt $queue.Count; $q++) {
+            $job = $queue[$q].Job
+            $round = $queue[$q].Round
             while ($sync.Pause -and -not $sync.Cancel) { $P.Paused = $true; Start-Sleep -Milliseconds 200 }
             $P.Paused = $false
             if ($sync.Cancel) { $cancelled = $true; break }
@@ -967,6 +1066,7 @@ function Invoke-Copy {
                 break
             }
 
+            if ($round -gt 1) { $P.Step = 'second try' } else { $P.Step = '' }
             Set-Current -Name $entry.Name -Folder $job.Folder -Size $entry.Size
             Update-Progress -Force
             try { $result = Copy-OneFile -Job $job -StagingDirectory $staging }
@@ -974,24 +1074,46 @@ function Invoke-Copy {
                 if (Test-Cancelled $_) { $cancelled = $true; break }
                 $result = @{ Ok = $false; Error = (Get-ErrorText $_); Attempts = 1 }
             }
+            $P.Step = ''
 
             $info = $perFolder[$job.Folder]
+            $final = $true
             if ($result.Ok) {
+                $inARow = 0
                 $copied++; $copiedBytes += $result.Bytes
                 if ($result.Status -eq 'renamed') { $renamed++ }
                 $info.Done++; $info.DoneBytes += $result.Bytes
             }
             else {
-                $info.Failed++
-                [void] $failed.Add(@{ Folder = $job.Folder; Name = $entry.Name; Error = $result.Error })
-                Write-ManifestRow -Status 'failed' -Entry $entry -Size $entry.Size -FinalPath $job.Landing -Sha '' -Seconds 0 -Attempts $result.Attempts -ErrorText $result.Error
+                $inARow++
                 if ($result.DiskFull) {
+                    $info.Failed++
+                    [void] $failed.Add(@{ Folder = $job.Folder; Name = $entry.Name; Error = $result.Error })
+                    Write-ManifestRow -Status 'failed' -Entry $entry -Size $entry.Size -FinalPath $job.Landing -Sha '' -Seconds 0 -Attempts $result.Attempts -ErrorText $result.Error
                     $stopReason = 'The PC''s disk is full, so copying stopped. Free up some space (or pick another drive) and press Copy again - it continues where it stopped.'
                     break
                 }
+                if ($round -eq 1) {
+                    [void] $queue.Add(@{ Job = $job; Round = 2 })   # one more go at the end
+                    $final = $false
+                    Write-Log "  $($entry.Rel)\$($entry.Name) will be tried again at the end"
+                }
+                else {
+                    $info.Failed++
+                    [void] $failed.Add(@{ Folder = $job.Folder; Name = $entry.Name; Error = $result.Error })
+                    Write-ManifestRow -Status 'failed' -Entry $entry -Size $entry.Size -FinalPath $job.Landing -Sha '' -Seconds 0 -Attempts $result.Attempts -ErrorText $result.Error
+                }
+                # Several files in a row failing means the phone itself is stuck, not the files.
+                if ($inARow -ge 3 -and $script:Source.Kind -eq 'Device') {
+                    try { Wait-ForReplug }
+                    catch { if (Test-Cancelled $_) { $cancelled = $true; break } }
+                    $inARow = 0
+                }
             }
-            $P.FilesDone = [int64] $P.FilesDone + 1
-            $P.BytesDone = [int64] $P.BytesDone + $entry.Size
+            if ($final) {
+                $P.FilesDone = [int64] $P.FilesDone + 1
+                $P.BytesDone = [int64] $P.BytesDone + $entry.Size
+            }
             $P.CurrentBytes = [int64] 0
             Update-Progress -Force
             Send-Event 'CopyFolderProgress' @{ Name = $job.Folder; Done = $info.Done; ToCopy = $info.ToCopy; Failed = $info.Failed; DoneBytes = $info.DoneBytes; ToCopyBytes = $info.ToCopyBytes; TotalCopied = $copied; TotalFailed = $failed.Count }

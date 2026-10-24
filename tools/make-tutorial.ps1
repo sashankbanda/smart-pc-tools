@@ -58,7 +58,17 @@ function New-DemoData {
     function Write-DemoFile([string] $Path, [int64] $Size, [DateTime] $When) {
         $stream = [System.IO.File]::Create($Path)
         try {
-            $header = [System.Text.Encoding]::ASCII.GetBytes($Path)      # makes every file's content unique
+            # A real file header for its type (the app checks it), then the path, which makes
+            # every file's content unique.
+            $magic = switch ([System.IO.Path]::GetExtension($Path).ToLowerInvariant()) {
+                '.jpg'  { [byte[]] (0xFF, 0xD8, 0xFF, 0xE0) }
+                '.png'  { [byte[]] (0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) }
+                '.heic' { [byte[]] (0, 0, 0, 0x18) + [System.Text.Encoding]::ASCII.GetBytes('ftypheic') }
+                '.mov'  { [byte[]] (0, 0, 0, 0x14) + [System.Text.Encoding]::ASCII.GetBytes('ftypqt  ') }
+                '.aae'  { [System.Text.Encoding]::ASCII.GetBytes('<?xml version="1.0" encoding="UTF-8"?>') }
+                default { [byte[]] @() }
+            }
+            $header = [byte[]] $magic + [System.Text.Encoding]::ASCII.GetBytes($Path)
             $stream.Write($header, 0, $header.Length)
             $left = $Size - $header.Length
             $offset = $random.Next(0, 1MB)
