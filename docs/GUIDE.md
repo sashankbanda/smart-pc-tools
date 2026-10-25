@@ -148,6 +148,7 @@ When your PC has little memory (RAM) and too many apps are open, everything gets
 | Inside `extras\` | What it is |
 | --- | --- |
 | `iphone-command-line\` | The command-line iPhone copier (below) |
+| `launch-film\` | The 60-second launch film, made from code (see [its README](../extras/launch-film/README.md)) |
 | `video-tools\` | Scripts that made the demo video and the front-page animation |
 | `old-tutorial\` | A video of the earlier, iPhone-only version of Smart Transfer |
 
