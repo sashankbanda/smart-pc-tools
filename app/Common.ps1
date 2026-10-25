@@ -604,8 +604,10 @@ function Save-Screenshot {
         New-Item -ItemType Directory -Force -Path $ScreenshotDir | Out-Null
         $window.UpdateLayout()
         $content = $window.Content
-        $w = [int] $content.ActualWidth; $h = [int] $content.ActualHeight
-        $bitmap = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+        $scale = 1.0   # sharper screenshots for videos: SMART_SCREENSHOT_SCALE=2
+        if ($env:SMART_SCREENSHOT_SCALE) { $scale = [double]::Parse($env:SMART_SCREENSHOT_SCALE, [Globalization.CultureInfo]::InvariantCulture) }
+        $w = [int] ($content.ActualWidth * $scale); $h = [int] ($content.ActualHeight * $scale); $dpi = 96 * $scale
+        $bitmap = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, $dpi, $dpi, [System.Windows.Media.PixelFormats]::Pbgra32)
         $bitmap.Render($content)
         $encoder = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
         $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($bitmap))

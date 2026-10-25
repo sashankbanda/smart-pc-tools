@@ -17,6 +17,13 @@
 .PARAMETER SkipCapture
     Reuse the screenshots from an earlier run and only rebuild the video.
 
+.PARAMETER CaptureOnly
+    Only take the screenshots (into WorkDir\shots), without making the video. The launch film in
+    extras\launch-film uses this.
+
+.PARAMETER ScreenshotScale
+    Take the screenshots this many times larger than the window (2 = twice as sharp).
+
 .PARAMETER PreviewDir
     Also save one still frame per scene there, to look at without playing the video.
 
@@ -32,6 +39,8 @@ param(
     [string] $WorkDir = (Join-Path $env:TEMP 'smart-pc-tools-promo'),
     [string] $Output = '',
     [switch] $SkipCapture,
+    [switch] $CaptureOnly,
+    [double] $ScreenshotScale = 1,
     [switch] $MemoryOnly,
     [int] $Fps = 30,
     [int] $Bitrate = 6000000,
@@ -284,6 +293,7 @@ function Invoke-Tool {
 
 function Invoke-Capture {
     Write-Host 'Capturing the real screens (demo data only)...'
+    $env:SMART_SCREENSHOT_SCALE = [string] $ScreenshotScale   # read by Save-Screenshot in the tools
     if ((Test-Path -LiteralPath $Shots) -and -not $MemoryOnly) { Remove-Item -LiteralPath $Shots -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $Shots | Out-Null
     $procs = @()
@@ -684,5 +694,6 @@ function Render-Video {
 }
 
 if (-not $SkipCapture) { Invoke-Capture }
+if ($CaptureOnly) { return }
 if (-not $NoVoice) { Get-Speech }
 Render-Video
