@@ -68,7 +68,7 @@ trap {
     break
 }
 
-if ($Tutorial) { throw 'The tutorial recording (tools\make-tutorial.ps1) has not been updated for the step-by-step screens yet.' }
+if ($Tutorial) { throw 'The tutorial recording (extras\video-tools\make-tutorial.ps1) has not been updated for the step-by-step screens yet.' }
 if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
     throw 'Please start Smart Transfer with "Smart Transfer.cmd" (it needs powershell -STA).'
 }
@@ -2447,7 +2447,8 @@ function Step-AutoPilot {
         }
         'copy' {
             $p = $sync.Progress
-            if ($app.CopyRunning -and -not $auto.Shots['copying'] -and [double] $p.BytesDone -gt 0) { Save-Screenshot 'copying'; $auto.Shots['copying'] = $true }
+            # Part-way through, so the screenshots show real progress.
+            if ($app.CopyRunning -and -not $auto.Shots['copying'] -and [double] $p.BytesTotal -gt 0 -and ([double] $p.BytesDone + [double] $p.CurrentBytes) -gt 0.4 * [double] $p.BytesTotal) { Save-Screenshot 'copying'; $auto.Shots['copying'] = $true }
             if ($AutoTrouble -and $app.CopyRunning -and $auto.Shots['copying'] -and -not $auto.Shots['trouble']) {
                 $auto.Shots['trouble'] = $true
                 Invoke-EngineEvent @{ Type = 'Trouble'; On = $true }; Save-Screenshot 'trouble'; Invoke-EngineEvent @{ Type = 'Trouble'; On = $false }
@@ -2460,7 +2461,7 @@ function Step-AutoPilot {
                 & $next 'stopped'
                 return
             }
-            if ($app.CheckRunning -and -not $auto.Shots['checking'] -and [double] $p.BytesDone -gt 0) { Save-Screenshot 'checking'; $auto.Shots['checking'] = $true }
+            if ($app.CheckRunning -and -not $auto.Shots['checking'] -and [double] $p.BytesTotal -gt 0 -and [double] $p.BytesDone -gt 0.3 * [double] $p.BytesTotal) { Save-Screenshot 'checking'; $auto.Shots['checking'] = $true }
             if ($AutoStopAfter -eq 'Copy' -and $app.CopyDone) { & $next 'finish'; return }
             if ($app.Page -eq 'Result' -and -not $app.CheckRunning) { & $next 'result' }
         }

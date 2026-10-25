@@ -1,5 +1,6 @@
 // Writes an H.264 MP4 from raw 32-bit BGRA frames using Windows' built-in Media Foundation
-// encoder - nothing to install. Used by make-tutorial.ps1. C# 5 (Windows PowerShell Add-Type).
+// encoder - nothing to install - optionally with an AAC sound track. Used by make-tutorial.ps1
+// and make-promo.ps1. C# 5 (Windows PowerShell Add-Type).
 
 using System;
 using System.Runtime.InteropServices;
@@ -106,14 +107,31 @@ namespace TutorialVideo
         static Guid MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS = new Guid("a634a91c-822b-41b9-a494-4de4643612b0");
         static Guid MF_SINK_WRITER_DISABLE_THROTTLING = new Guid("08b845d8-2b74-4afe-9d53-be16d2d5ae4f");
 
+        static Guid MFMediaType_Audio = new Guid("73647561-0000-0010-8000-00AA00389B71");
+        static Guid MFAudioFormat_AAC = new Guid("00001610-0000-0010-8000-00AA00389B71");
+        static Guid MFAudioFormat_PCM = new Guid("00000001-0000-0010-8000-00AA00389B71");
+        static Guid MF_MT_AUDIO_NUM_CHANNELS = new Guid("37e48bf5-645e-4c5b-89de-ada9e29b696a");
+        static Guid MF_MT_AUDIO_SAMPLES_PER_SECOND = new Guid("5faeeae7-0290-4c31-9e8a-c534f68d9dba");
+        static Guid MF_MT_AUDIO_BITS_PER_SAMPLE = new Guid("f2deb57f-40fa-4764-aa33-ed4f2d1ff669");
+        static Guid MF_MT_AUDIO_AVG_BYTES_PER_SECOND = new Guid("1aab75c8-cfef-451c-ab95-ac034b8e1731");
+        static Guid MF_MT_AUDIO_BLOCK_ALIGNMENT = new Guid("322de230-9eeb-43bd-ab7a-ff412251541d");
+
         IMFSinkWriter _writer;
         uint _stream;
         readonly int _width, _height, _fps;
         long _frame;
         bool _started;
+        uint _audioStream;
+        readonly int _audioRate, _audioChannels;
+        long _audioFrames;
 
-        public Mp4Writer(string path, int width, int height, int fps, int bitrate)
+        public Mp4Writer(string path, int width, int height, int fps, int bitrate) : this(path, width, height, fps, bitrate, 0, 0) { }
+
+        // With an AAC sound track as well (audioRate 44100 or 48000, 1 or 2 channels), fed as
+        // 16-bit PCM through WriteAudio.
+        public Mp4Writer(string path, int width, int height, int fps, int bitrate, int audioRate, int audioChannels)
         {
+            _audioRate = audioRate; _audioChannels = audioChannels;
             _width = width; _height = height; _fps = fps;
             MFStartup(0x00020070, 0);
             _started = true;
@@ -146,7 +164,56 @@ namespace TutorialVideo
             input.SetUINT64(ref MF_MT_FRAME_RATE, ((ulong)(uint)fps << 32) | 1);
             input.SetUINT64(ref MF_MT_PIXEL_ASPECT_RATIO, (1UL << 32) | 1);
             _writer.SetInputMediaType(_stream, input, IntPtr.Zero);
+
+            if (audioRate > 0)
+            {
+                IMFMediaType audioOut;
+                MFCreateMediaType(out audioOut);
+                audioOut.SetGUID(ref MF_MT_MAJOR_TYPE, ref MFMediaType_Audio);
+                audioOut.SetGUID(ref MF_MT_SUBTYPE, ref MFAudioFormat_AAC);
+                audioOut.SetUINT32(ref MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+                audioOut.SetUINT32(ref MF_MT_AUDIO_SAMPLES_PER_SECOND, (uint)audioRate);
+                audioOut.SetUINT32(ref MF_MT_AUDIO_NUM_CHANNELS, (uint)audioChannels);
+                audioOut.SetUINT32(ref MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24000);   // 192 kbit/s, the highest the AAC encoder takes
+                _writer.AddStream(audioOut, out _audioStream);
+
+                IMFMediaType audioIn;
+                MFCreateMediaType(out audioIn);
+                audioIn.SetGUID(ref MF_MT_MAJOR_TYPE, ref MFMediaType_Audio);
+                audioIn.SetGUID(ref MF_MT_SUBTYPE, ref MFAudioFormat_PCM);
+                audioIn.SetUINT32(ref MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+                audioIn.SetUINT32(ref MF_MT_AUDIO_SAMPLES_PER_SECOND, (uint)audioRate);
+                audioIn.SetUINT32(ref MF_MT_AUDIO_NUM_CHANNELS, (uint)audioChannels);
+                audioIn.SetUINT32(ref MF_MT_AUDIO_BLOCK_ALIGNMENT, (uint)(audioChannels * 2));
+                audioIn.SetUINT32(ref MF_MT_AUDIO_AVG_BYTES_PER_SECOND, (uint)(audioRate * audioChannels * 2));
+                _writer.SetInputMediaType(_audioStream, audioIn, IntPtr.Zero);
+            }
             _writer.BeginWriting();
+        }
+
+        // pcm: 16-bit samples, channels interleaved; count bytes of it are written, right after
+        // the sound written before.
+        public void WriteAudio(byte[] pcm, int count)
+        {
+            if (_audioRate <= 0 || count <= 0) return;
+            IMFMediaBuffer buffer;
+            MFCreateMemoryBuffer(count, out buffer);
+            IntPtr data; int max, current;
+            buffer.Lock(out data, out max, out current);
+            Marshal.Copy(pcm, 0, data, count);
+            buffer.Unlock();
+            buffer.SetCurrentLength(count);
+
+            IMFSample sample;
+            MFCreateSample(out sample);
+            sample.AddBuffer(buffer);
+            long frames = count / (_audioChannels * 2);
+            sample.SetSampleTime(_audioFrames * 10000000L / _audioRate);
+            sample.SetSampleDuration(frames * 10000000L / _audioRate);
+            _writer.WriteSample(_audioStream, sample);
+            _audioFrames += frames;
+            Marshal.ReleaseComObject(sample);
+            Marshal.ReleaseComObject(buffer);
         }
 
         // pixels: width*height*4 bytes, BGRA, top row first.
