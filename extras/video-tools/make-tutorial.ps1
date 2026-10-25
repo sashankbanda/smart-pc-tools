@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Records the "how to use iPhone Transfer" video: docs\iPhone-Transfer-tutorial.mp4
+    Records the "how to use iPhone Transfer" video: extras\old-tutorial\iPhone-Transfer-tutorial.mp4
 
 .DESCRIPTION
     1. Builds a demo iPhone - a folder of made-up month folders and photos - and a demo PC
@@ -13,13 +13,13 @@
        the right, a spotlight on the control to use and a pointer that clicks it.
        Encoded to H.264 MP4 with Windows' own Media Foundation - nothing to install.
 
-    Run it from anywhere:  powershell -STA -ExecutionPolicy Bypass -File tools\make-tutorial.ps1
+    Run it from anywhere:  powershell -STA -ExecutionPolicy Bypass -File extras\video-tools\make-tutorial.ps1
 
 .PARAMETER WorkDir
     Scratch space for the demo files and screenshots (about 2 GB while it runs).
 
 .PARAMETER Output
-    The video file to write. Default: docs\iPhone-Transfer-tutorial.mp4 in the project.
+    The video file to write. Default: extras\old-tutorial\iPhone-Transfer-tutorial.mp4 in the project.
 
 .PARAMETER SkipCapture
     Reuse the screenshots from an earlier run and only rebuild the video.
@@ -35,8 +35,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Root = Split-Path -Parent $PSScriptRoot
-if (-not $Output) { $Output = Join-Path $Root 'docs\iPhone-Transfer-tutorial.mp4' }
+$Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # this script lives in extras\video-tools
+if (-not $Output) { $Output = Join-Path $Root 'extras\old-tutorial\iPhone-Transfer-tutorial.mp4' }
 $Shots = Join-Path $WorkDir 'shots'
 
 Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
