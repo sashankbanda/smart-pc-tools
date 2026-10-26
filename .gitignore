@@ -1,3 +1,6 @@
-# Videos made by extras/video-tools are too big for GitHub (over 100 MB): keep them local,
-# or attach them to a GitHub release.
-extras/video-tools/output/
+# Kept on this PC only, not on GitHub: the projects that made the videos (big, and not needed to
+# use the tools). The finished videos are attached to the GitHub release instead.
+extras/launch-film/
+extras/tutorial/
+extras/video-tools/
+extras/old-tutorial/

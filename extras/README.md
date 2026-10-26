@@ -5,8 +5,5 @@
 | Folder | What it is |
 | --- | --- |
 | `iphone-command-line\` | Copy photos off an iPhone from a command window or a scheduled task |
-| `launch-film\` | The 60-second launch film (16:9 and 9:16), made from code - see its README |
-| `video-tools\` | Scripts that made the demo video and the README animation |
-| `old-tutorial\` | A video of the earlier, iPhone-only version of Smart Transfer |
 
-Details are in the [full guide](../docs/GUIDE.md#for-advanced-users).
+Details are in the [full guide](../docs/GUIDE.md#for-advanced-users). The videos are on the [releases page](https://github.com/sashankbanda/smart-pc-tools/releases/latest).

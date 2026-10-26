@@ -142,15 +142,10 @@ When your PC has little memory (RAM) and too many apps are open, everything gets
 | --- | --- |
 | `Smart Transfer.cmd`, `Smart Cleanup.cmd`, `Smart Memory.cmd` | The three tools - the only files you need to double-click |
 | `app\` | The tools themselves (PowerShell and a little C#, compiled automatically when a tool starts) |
-| `docs\` | This guide, and the animation on the front page |
-| `extras\` | Optional extras - not needed to use the tools (see below) |
+| `docs\` | This guide, and the pictures on the front page |
+| `extras\` | The command-line iPhone copier (below) - not needed to use the tools |
 
-| Inside `extras\` | What it is |
-| --- | --- |
-| `iphone-command-line\` | The command-line iPhone copier (below) |
-| `launch-film\` | The 60-second launch film, made from code (see [its README](../extras/launch-film/README.md)) |
-| `video-tools\` | Scripts that made the demo video and the front-page animation |
-| `old-tutorial\` | A video of the earlier, iPhone-only version of Smart Transfer |
+The videos (launch film, overview and full tutorial) are on the [releases page](https://github.com/sashankbanda/smart-pc-tools/releases/latest).
 
 ### The command-line iPhone copier
 
@@ -199,13 +194,3 @@ powershell -STA -ExecutionPolicy Bypass -File app\SmartMemory.ps1 -AutoPilot -Au
 ```
 
 (`-DemoPhone` is a folder of month folders, like `202607_a`, that plays the part of an iPhone. Smart Cleanup's test folder must be outside `AppData`, where nothing is ever suggested.)
-
-### Making the demo video and the animation
-
-```powershell
-# the narrated demo video (written to extras\video-tools\output - too big for GitHub, so it stays local)
-powershell -STA -ExecutionPolicy Bypass -File extras\video-tools\make-promo.ps1
-
-# the looping animation at the top of the README (docs\assets\hero.gif)
-powershell -STA -ExecutionPolicy Bypass -File extras\video-tools\make-banner.ps1
-```
