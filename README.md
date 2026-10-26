@@ -28,24 +28,24 @@
 <table>
   <tr>
     <td align="center" width="33%">
-      <a href="https://github.com/sashankbanda/smart-pc-tools/releases/download/v1.0/smart-pc-tools-launch-16x9.mp4"><img src="docs/assets/video-launch.jpg" alt="Watch the launch film (1 minute)" /></a><br />
+      <a href="https://www.youtube.com/watch?v=kjYxsqB7BYU"><img src="docs/assets/video-launch.jpg" alt="Watch the launch film on YouTube (1 minute)" /></a><br />
       <b>Launch film</b> · 1 min<br />
-      <sub>The three tools in a minute · <a href="https://github.com/sashankbanda/smart-pc-tools/releases/download/v1.0/smart-pc-tools-launch-9x16.mp4">phone version</a></sub>
+      <sub>The three tools in a minute</sub>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/sashankbanda/smart-pc-tools/releases/download/v1.0/smart-pc-tools-overview-16x9.mp4"><img src="docs/assets/video-overview.jpg" alt="Watch the quick overview (under 2 minutes)" /></a><br />
+      <a href="https://www.youtube.com/watch?v=jpQi2nEWjB0"><img src="docs/assets/video-overview.jpg" alt="Watch the quick overview on YouTube (under 2 minutes)" /></a><br />
       <b>Quick overview</b> · 1:44<br />
-      <sub>Download, open, use · <a href="https://github.com/sashankbanda/smart-pc-tools/releases/download/v1.0/smart-pc-tools-overview-9x16.mp4">phone version</a></sub>
+      <sub>Download, open, use</sub>
     </td>
     <td align="center" width="33%">
-      <a href="https://github.com/sashankbanda/smart-pc-tools/releases/download/v1.0/smart-pc-tools-tutorial.mp4"><img src="docs/assets/video-tutorial.jpg" alt="Watch the full tutorial (11 minutes)" /></a><br />
+      <a href="https://www.youtube.com/watch?v=vBA5Q2OQ9iE"><img src="docs/assets/video-tutorial.jpg" alt="Watch the full tutorial on YouTube (11 minutes)" /></a><br />
       <b>Full tutorial</b> · 11 min<br />
-      <sub>Every step, from GitHub to done · <a href="https://github.com/sashankbanda/smart-pc-tools/releases/download/v1.0/smart-pc-tools-tutorial.srt">subtitles</a></sub>
+      <sub>Every step, from GitHub to done</sub>
     </td>
   </tr>
 </table>
 
-<sub>Click a picture to open the video. All videos, with subtitles and chapters, are on the <a href="https://github.com/sashankbanda/smart-pc-tools/releases/tag/v1.0">release page</a>.</sub>
+<p align="center"><a href="https://www.youtube.com/watch?v=jpQi2nEWjB0"><img src="https://img.shields.io/badge/Watch%20on-YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="Watch on YouTube" /></a></p>
 
 ## Start in 3 steps
 

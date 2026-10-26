@@ -145,7 +145,7 @@ When your PC has little memory (RAM) and too many apps are open, everything gets
 | `docs\` | This guide, and the pictures on the front page |
 | `extras\` | The command-line iPhone copier (below) - not needed to use the tools |
 
-The videos (launch film, overview and full tutorial) are on the [releases page](https://github.com/sashankbanda/smart-pc-tools/releases/latest).
+Videos on YouTube: the [launch film](https://www.youtube.com/watch?v=kjYxsqB7BYU) (1 min), a [quick overview](https://www.youtube.com/watch?v=jpQi2nEWjB0) (under 2 min) and the [full tutorial](https://www.youtube.com/watch?v=vBA5Q2OQ9iE) (11 min, with chapters).
 
 ### The command-line iPhone copier
 

@@ -6,4 +6,4 @@
 | --- | --- |
 | `iphone-command-line\` | Copy photos off an iPhone from a command window or a scheduled task |
 
-Details are in the [full guide](../docs/GUIDE.md#for-advanced-users). The videos are on the [releases page](https://github.com/sashankbanda/smart-pc-tools/releases/latest).
+Details are in the [full guide](../docs/GUIDE.md#for-advanced-users). New to the tools? Watch the [full tutorial on YouTube](https://www.youtube.com/watch?v=vBA5Q2OQ9iE).
